@@ -1,446 +1,703 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Quest 3 MR Cloth (hand + table)</title>
-  <style>
-    html,body { margin:0; height:100%; overflow:hidden; background:#000; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
-    #enter { position: fixed; inset: 0; display: grid; place-items: center; background: #0b0b0b; color: #fff; }
-    #enter button { font-size: 18px; padding: 14px 18px; border: 0; border-radius: 14px; background: #1e90ff; color:#fff; box-shadow: 0 10px 30px rgba(30,144,255,.35); }
-    #hud { position: fixed; left: 12px; right: 12px; bottom: 12px; display:flex; gap:8px; align-items:center; justify-content:space-between; pointer-events:none; }
-    #note { pointer-events:none; color:#fff; background: rgba(0,0,0,.45); padding: 8px 10px; border-radius: 12px; font-size: 14px; line-height: 1.2; }
-    #reload { pointer-events:auto; padding: 8px 12px; border-radius: 10px; border: 0; background: rgba(255,255,255,.12); color:#fff; }
-  </style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+<title>Quest 3 MR Cloth (single file)</title>
+<style>
+  :root { --ui-bg: rgba(15,15,20,0.7); --ui-fg: #fff; --ui-ac: #66d; }
+  html, body { margin:0; padding:0; background:#000; height:100%; overflow:hidden; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, sans-serif; color:var(--ui-fg); }
+  #xr-canvas { width:100vw; height:100vh; display:block; background:#000; }
+  .hud {
+    position: fixed; left: 0; right: 0; top: 0; display:flex; justify-content:center; padding: 8px;
+    pointer-events:none; z-index:10;
+  }
+  .panel {
+    pointer-events:auto;
+    background: var(--ui-bg);
+    border: 1px solid rgba(255,255,255,0.15);
+    backdrop-filter: blur(6px);
+    border-radius: 10px; padding: 10px 12px; display:flex; gap:8px; align-items:center;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.35);
+  }
+  button {
+    appearance:none; border:1px solid rgba(255,255,255,0.22); border-radius:8px;
+    background:#1a1f29; color:var(--ui-fg); padding:8px 12px; font-weight:600; cursor:pointer;
+  }
+  button.primary { background: var(--ui-ac); border-color: #445; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  #msg { font-size: 14px; opacity: .9; }
+  .footer {
+    position: fixed; left: 0; right: 0; bottom: 0; display:flex; justify-content:center; padding: 8px; z-index:10; pointer-events:none;
+  }
+  .footer .panel { pointer-events:auto; }
+  .dot { width:8px; height:8px; border-radius:50%; background:#8fd; display:inline-block; margin-right:6px; }
+  a { color:#9cf; }
+</style>
 </head>
 <body>
-  <div id="enter">
-    <div style="display:grid;gap:16px;place-items:center;text-align:center;max-width:640px;padding:24px">
-      <h1 style="margin:0;color:white">Quest 3 Mixed‑Reality Cloth</h1>
-      <p style="color:#cfd8dc;margin:0">Loads in <b>immersive‑AR</b> with <b>hand‑tracking</b>, <b>plane‑detection</b>, and <b>hit‑test</b>. 
-        Pinch your thumb + index to grab the cloth. Release to drop. 
-        Tap A/X (or air‑tap) to choose your table if the auto table pick fails.</p>
-      <button id="start">Enter Mixed Reality</button>
-      <small style="color:#9aa6b2">Tip: Give the app motion permission in the Quest Browser if prompted.</small>
-    </div>
+<canvas id="xr-canvas" aria-label="Mixed Reality cloth canvas"></canvas>
+
+<div class="hud">
+  <div class="panel">
+    <span class="dot" id="statusDot" title="Session status"></span>
+    <div id="msg">Ready.</div>
+    <button id="enter" class="primary">Enter Mixed Reality</button>
+    <button id="reset">Reset</button>
   </div>
-  <div style="position:fixed;top:58px;left:8px;right:8px;display:flex;gap:8px;justify-content:center;z-index:3">
-    <button id="startNonAR" style="font-size:14px;padding:8px 10px;border:0;border-radius:10px;background:#607d8b;color:#fff">Run Non‑AR demo</button>
-    <button id="runDiag" style="font-size:14px;padding:8px 10px;border:0;border-radius:10px;background:#8bc34a;color:#000">Run Diagnostics</button>
-    <button id="copyLog" style="font-size:14px;padding:8px 10px;border:0;border-radius:10px;background:#9c27b0;color:#fff">Copy Log</button>
+</div>
+
+<div class="footer">
+  <div class="panel" style="font-size:13px; line-height:1.2;">
+    <div><b>Instructions</b>: Look at your table until the reticle sticks. <b>Pinch</b> to place the plane &amp; spawn cloth. Pinch near cloth to grab; release to drop. Use <b>Reset</b> if needed.</div>
   </div>
-  <div id="hud" hidden>
-    <div id="note">Scanning for a horizontal table…</div>
-    <button id="reload" title="Reset cloth">Reset cloth</button>
-  </div>
-  <script type="module">
-    // --- Minimal Three.js via ESM (lightweight single import) ---
-    import * as THREE from 'https://unpkg.com/three@0.161.0/build/three.module.js';
-    import { XRHandModelFactory } from 'https://unpkg.com/three@0.161.0/examples/jsm/webxr/XRHandModelFactory.js';
+</div>
 
-    // Feature checks
-    const arSupported = !!(navigator.xr) && await navigator.xr.isSessionSupported?.('immersive-ar');
-    const vrSupported = !!(navigator.xr) && await navigator.xr.isSessionSupported?.('immersive-vr');
-    const supported = arSupported;
-    const requiredFeatures = ['hand-tracking'];
-    const optionalFeatures = ['hit-test','plane-detection','anchors','dom-overlay','layers'];
+<script type="module">
+'use strict';
 
-    const enterUI = document.getElementById('enter');
-    const startBtn = document.getElementById('start');
-    const hud = document.getElementById('hud');
-    const note = document.getElementById('note');
-    const reloadBtn = document.getElementById('reload');
-    const logDiv = document.getElementById('log');
-    const startNonAR = document.getElementById('startNonAR');
-    const runDiag = document.getElementById('runDiag');
-    const copyLog = document.getElementById('copyLog');
-    const log = (...a)=>{ try{ logDiv.style.display='block'; logDiv.textContent += a.join(' ')+'
-'; }catch{} console.log(...a); };
+/* -------------------------- Minimal math utils --------------------------- */
+const V = {
+  add:(a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]],
+  sub:(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]],
+  mul:(a,s)=>[a[0]*s,a[1]*s,a[2]*s],
+  dot:(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2],
+  cross:(a,b)=>[a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]],
+  len:(a)=>Math.hypot(a[0],a[1],a[2]),
+  norm:(a)=>{ const L=V.len(a)||1; return [a[0]/L,a[1]/L,a[2]/L]; }
+};
+function mat4Identity(){ return [1,0,0,0,  0,1,0,0,  0,0,1,0,  0,0,0,1]; }
+function mat4Multiply(a,b){ // a*b
+  const o=new Float32Array(16);
+  for(let c=0;c<4;c++) for(let r=0;r<4;r++){
+    o[c*4+r]=a[0*4+r]*b[c*4+0]+a[1*4+r]*b[c*4+1]+a[2*4+r]*b[c*4+2]+a[3*4+r]*b[c*4+3];
+  }
+  return o;
+}
+function mat4FromPose(pose){ // XRRigidTransform.matrix is Float32Array already column-major
+  return pose ? new Float32Array(pose.matrix) : new Float32Array(mat4Identity());
+}
+function mat4InverseRigid(m){ // inverse of rigid transform (R,t)
+  // [ R  t ]^-1 = [ R^T  -R^T t ]
+  const r00=m[0], r01=m[1], r02=m[2];
+  const r10=m[4], r11=m[5], r12=m[6];
+  const r20=m[8], r21=m[9], r22=m[10];
+  const tx = m[12], ty = m[13], tz = m[14];
+  const o = new Float32Array(16);
+  o[0]=r00; o[1]=r10; o[2]=r20; o[3]=0;
+  o[4]=r01; o[5]=r11; o[6]=r21; o[7]=0;
+  o[8]=r02; o[9]=r12; o[10]=r22; o[11]=0;
+  o[12]=-(o[0]*tx + o[4]*ty + o[8]*tz);
+  o[13]=-(o[1]*tx + o[5]*ty + o[9]*tz);
+  o[14]=-(o[2]*tx + o[6]*ty + o[10]*tz);
+  o[15]=1;
+  return o;
+}
+function quatToBasisY(q){ // returns world-space "up" from quaternion (assumes unit) – rotate (0,1,0)
+  const [x,y,z,w]=q; // column-major not needed
+  // v' = q * (0,1,0,0) * conj(q)
+  const vx = 2*(x*y + w*z);
+  const vy = 1 - 2*(x*x + z*z);
+  const vz = 2*(y*z - w*x);
+  return [vx,vy,vz];
+}
+function quatFromMat(m){ // approximate, extract from rotation part
+  const m00=m[0], m11=m[5], m22=m[10];
+  const tr=m00+m11+m22;
+  let x,y,z,w;
+  if(tr>0){ const S=Math.sqrt(tr+1.0)*2; w=0.25*S; x=(m[6]-m[9])/S; y=(m[8]-m[2])/S; z=(m[1]-m[4])/S; }
+  else if((m00>m11)&(m00>m22)){ const S=Math.sqrt(1.0+m00-m11-m22)*2; w=(m[6]-m[9])/S; x=0.25*S; y=(m[4]+m[1])/S; z=(m[8]+m[2])/S; }
+  else if(m11>m22){ const S=Math.sqrt(1.0+m11-m00-m22)*2; w=(m[8]-m[2])/S; x=(m[4]+m[1])/S; y=0.25*S; z=(m[9]+m[6])/S; }
+  else { const S=Math.sqrt(1.0+m22-m00-m11)*2; w=(m[1]-m[4])/S; x=(m[8]+m[2])/S; y=(m[9]+m[6])/S; z=0.25*S; }
+  return [x,y,z,w];
+}
 
-    if (!supported) startBtn.textContent = 'WebXR AR not supported here';
+/* ----------------------------- GL boilerplate ---------------------------- */
+const canvas = document.getElementById('xr-canvas');
+/** @type {WebGLRenderingContext} */
+let gl;
+let session, refSpace, viewerSpace, baseLayer, hitTestSource;
 
-    // --- THREE setup ---
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setPixelRatio(devicePixelRatio);
-    renderer.setSize(innerWidth, innerHeight);
-    renderer.xr.enabled = true;
-    document.body.appendChild(renderer.domElement);
+function createGL(){
+  gl = canvas.getContext('webgl', { alpha:true, antialias:true, xrCompatible:true });
+  if(!gl) throw new Error('WebGL not supported');
+}
+function compile(gl, src, type){
+  const sh = gl.createShader(type); gl.shaderSource(sh, src); gl.compileShader(sh);
+  if(!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+  return sh;
+}
+function link(gl, vs, fs){
+  const p = gl.createProgram(); gl.attachShader(p,vs); gl.attachShader(p,fs); gl.linkProgram(p);
+  if(!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
 
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.01, 100);
+/* ------------------------------- Shaders -------------------------------- */
+const VS = `
+attribute vec3 aPos;
+attribute vec3 aNor;
+attribute vec2 aUV;
 
-    // Lighting (for cloth shading)
-    const light = new THREE.HemisphereLight(0xffffff, 0x444444, 1.0);
-    scene.add(light);
+uniform mat4 uProj;
+uniform mat4 uView;
+uniform mat4 uModel;
 
-    // Hands (for debugging/visuals; physics uses raw joints)
-    const handFactory = new XRHandModelFactory();
-    const hands = [];
+varying vec3 vN;
+varying vec3 vW;
+varying vec2 vUV;
 
-    // --- Cloth (particle-based, CPU, Verlet) ---
-    const cloth = {
-      w: 1.0, // meters
-      h: 1.0,
-      segX: 25,
-      segY: 25,
-      gravity: new THREE.Vector3(0, -9.8, 0),
-      damping: 0.995,
-      iterations: 5,
-      restDist: 0,
-      pinned: new Set(),
-      particles: [], // { pos:Vector3, prev:Vector3, invMass:number }
-      constraints: [] // [iA, iB, restLen]
-    };
+void main(){
+  vec4 wPos = uModel * vec4(aPos,1.0);
+  vW = wPos.xyz;
+  // normal (model assumed rigid)
+  vN = mat3(uModel) * aNor;
+  vUV = aUV;
+  gl_Position = uProj * uView * wPos;
+}`;
+const FS = `
+precision mediump float;
+varying vec3 vN;
+varying vec3 vW;
+varying vec2 vUV;
 
-    function buildCloth() {
-      cloth.particles.length = 0; cloth.constraints.length = 0; cloth.pinned.clear();
-      const { segX, segY, w, h } = cloth;
-      const dx = w/segX, dy = h/segY; cloth.restDist = Math.min(dx,dy);
-      for (let y=0;y<=segY;y++){
-        for (let x=0;x<=segX;x++){
-          const u = x/segX, v = y/segY;
-          const pos = new THREE.Vector3((u-0.5)*w, 0.6 + 0.25, (v-0.5)*h); // start above table
-          const prev = pos.clone();
-          cloth.particles.push({ pos, prev, invMass: 1.0 });
+uniform vec3 uEye;
+uniform vec3 uLightDir; // world-space dir
+uniform vec3 uBaseColor;
+uniform float uMetal;
+uniform float uRough;
+
+void main(){
+  vec3 N = normalize(vN);
+  vec3 L = normalize(-uLightDir);
+  vec3 V = normalize(uEye - vW);
+  vec3 H = normalize(L+V);
+
+  float ndl = max(dot(N,L), 0.0);
+  float ndh = max(dot(N,H), 0.0);
+  float spec = pow(ndh, mix(24.0, 4.0, clamp(uRough,0.0,1.0)));
+
+  vec3 base = uBaseColor;
+  vec3 color = base * (0.15 + 0.85*ndl) + vec3(0.6) * spec * (1.0 - uRough);
+  gl_FragColor = vec4(color, 1.0);
+}`;
+
+// simple color-only program (reticle & debug)
+const VS2 = `
+attribute vec3 aPos;
+uniform mat4 uProj, uView, uModel;
+void main(){ gl_Position = uProj * uView * uModel * vec4(aPos,1.0); }`;
+const FS2 = `precision mediump float; uniform vec4 uColor; void main(){ gl_FragColor = uColor; }`;
+
+/* ------------------------------ Geometry -------------------------------- */
+let progMain, progLine;
+let bufPos, bufNor, bufUV, bufIdx; // cloth
+let bufReticle; // line loop
+let loc = {};
+let loc2 = {};
+
+function initPrograms(){
+  const vs = compile(gl, VS, gl.VERTEX_SHADER);
+  const fs = compile(gl, FS, gl.FRAGMENT_SHADER);
+  progMain = link(gl, vs, fs);
+  loc = {
+    aPos: gl.getAttribLocation(progMain, 'aPos'),
+    aNor: gl.getAttribLocation(progMain, 'aNor'),
+    aUV:  gl.getAttribLocation(progMain, 'aUV'),
+    uProj: gl.getUniformLocation(progMain, 'uProj'),
+    uView: gl.getUniformLocation(progMain, 'uView'),
+    uModel: gl.getUniformLocation(progMain, 'uModel'),
+    uEye: gl.getUniformLocation(progMain, 'uEye'),
+    uLightDir: gl.getUniformLocation(progMain, 'uLightDir'),
+    uBaseColor: gl.getUniformLocation(progMain, 'uBaseColor'),
+    uMetal: gl.getUniformLocation(progMain, 'uMetal'),
+    uRough: gl.getUniformLocation(progMain, 'uRough'),
+  };
+  const vs2 = compile(gl, VS2, gl.VERTEX_SHADER);
+  const fs2 = compile(gl, FS2, gl.FRAGMENT_SHADER);
+  progLine = link(gl, vs2, fs2);
+  loc2 = {
+    aPos: gl.getAttribLocation(progLine, 'aPos'),
+    uProj: gl.getUniformLocation(progLine, 'uProj'),
+    uView: gl.getUniformLocation(progLine, 'uView'),
+    uModel: gl.getUniformLocation(progLine, 'uModel'),
+    uColor: gl.getUniformLocation(progLine, 'uColor'),
+  };
+}
+
+/* --------------------------- Cloth simulation --------------------------- */
+const CLOTH_W = 1.2, CLOTH_H = 1.2;   // meters size
+const NX = 32, NY = 32;               // grid resolution
+const NPTS = NX*NY;
+const DX = CLOTH_W/(NX-1), DY = CLOTH_H/(NY-1);
+const GRAV = [0,-9.8,0];
+const DAMP = 0.0015;
+const SUBSTEPS = 2;
+const ITER = 10;
+const PICK_RADIUS = 0.06; // m
+
+// arrays
+const pos = new Float32Array(NPTS*3);
+const prev= new Float32Array(NPTS*3);
+const nor = new Float32Array(NPTS*3);
+const invm= new Float32Array(NPTS);
+const uv  = new Float32Array(NPTS*2);
+let idx; // Uint16Array
+
+// constraints: [i,j,rest,stiff]
+const cons = [];
+function pIndex(ix,iy){ return iy*NX + ix; }
+function posOf(i){ return [pos[3*i],pos[3*i+1],pos[3*i+2]]; }
+function setPos(i, v){ pos[3*i]=v[0]; pos[3*i+1]=v[1]; pos[3*i+2]=v[2]; }
+
+function initClothAt(origin=[0,1.2,0], right=[1,0,0], up=[0,0,-1]){
+  // Build a flat sheet oriented by basis (right, up, normal = right x up)
+  // Default: hangs above plane, will drop with gravity
+  cons.length = 0;
+  for(let y=0;y<NY;y++){
+    for(let x=0;x<NX;x++){
+      const i = pIndex(x,y);
+      const u0 = x/(NX-1), v0 = y/(NY-1);
+      const base = V.add(origin, V.add(V.mul(right, (u0-0.5)*CLOTH_W), V.mul(up, (v0-0.5)*CLOTH_H)));
+      const jitter = ((x+y)&1)?0.0005:-0.0005;
+      pos[3*i]=base[0]; pos[3*i+1]=base[1]+0.3 + jitter; pos[3*i+2]=base[2];
+      prev[3*i]=pos[3*i]; prev[3*i+1]=pos[3*i+1]; prev[3*i+2]=pos[3*i+2];
+      invm[i]  = 1.0;
+      uv[2*i]=u0; uv[2*i+1]=v0;
+    }
+  }
+  // structural constraints
+  function addC(i,j,s){ cons.push(i,j,s,1.0); }
+  for(let y=0;y<NY;y++){
+    for(let x=0;x<NX;x++){
+      const i = pIndex(x,y);
+      if(x+1<NX) addC(i, pIndex(x+1,y), DX);
+      if(y+1<NY) addC(i, pIndex(x,y+1), DY);
+      if(x+1<NX && y+1<NY) addC(i, pIndex(x+1,y+1), Math.hypot(DX,DY)); // shear
+      if(x>0 && y+1<NY) addC(i, pIndex(x-1,y+1), Math.hypot(DX,DY));
+      // bend (2 steps)
+      if(x+2<NX) addC(i, pIndex(x+2,y), 2*DX);
+      if(y+2<NY) addC(i, pIndex(x,y+2), 2*DY);
+    }
+  }
+  // indices (triangles)
+  const tris = [];
+  for(let y=0;y<NY-1;y++){
+    for(let x=0;x<NX-1;x++){
+      const i0=pIndex(x,y), i1=pIndex(x+1,y), i2=pIndex(x,y+1), i3=pIndex(x+1,y+1);
+      tris.push(i0,i2,i1,  i1,i2,i3);
+    }
+  }
+  idx = (NPTS<65536) ? new Uint16Array(tris) : new Uint32Array(tris);
+  // Initial normals
+  recomputeNormals();
+}
+
+function recomputeNormals(){
+  for(let i=0;i<3*NPTS;i++) nor[i]=0;
+  for(let t=0;t<idx.length; t+=3){
+    const i0=idx[t], i1=idx[t+1], i2=idx[t+2];
+    const a=posOf(i0), b=posOf(i1), c=posOf(i2);
+    const e1=V.sub(b,a), e2=V.sub(c,a);
+    const n=V.cross(e1,e2);
+    nor[3*i0]+=n[0]; nor[3*i0+1]+=n[1]; nor[3*i0+2]+=n[2];
+    nor[3*i1]+=n[0]; nor[3*i1+1]+=n[1]; nor[3*i1+2]+=n[2];
+    nor[3*i2]+=n[0]; nor[3*i2+1]+=n[1]; nor[3*i2+2]+=n[2];
+  }
+  for(let i=0;i<NPTS;i++){
+    const n=[nor[3*i],nor[3*i+1],nor[3*i+2]];
+    const nn=V.norm(n);
+    nor[3*i]=nn[0]; nor[3*i+1]=nn[1]; nor[3*i+2]=nn[2];
+  }
+}
+
+function integrate(dt){
+  // Semi-implicit Verlet
+  const damping = Math.exp(-DAMP*dt);
+  for(let i=0;i<NPTS;i++){
+    const ix=3*i;
+    const x=[pos[ix],pos[ix+1],pos[ix+2]];
+    const prevx=[prev[ix],prev[ix+1],prev[ix+2]];
+    const vel = V.mul(V.sub(x,prevx), damping);
+    // gravity
+    const acc = V.mul(GRAV, dt*dt);
+    const nx = V.add(V.add(x, vel), acc);
+    prev[ix]=x[0]; prev[ix+1]=x[1]; prev[ix+2]=x[2];
+    pos[ix]=nx[0]; pos[ix+1]=nx[1]; pos[ix+2]=nx[2];
+  }
+}
+
+function satisfyConstraints(){
+  for(let it=0; it<ITER; it++){
+    // distance constraints
+    for(let k=0;k<cons.length;k+=4){
+      const i=cons[k], j=cons[k+1], rest=cons[k+2], stiff=cons[k+3];
+      const ix=3*i, jx=3*j;
+      const pi=[pos[ix],pos[ix+1],pos[ix+2]];
+      const pj=[pos[jx],pos[jx+1],pos[jx+2]];
+      let d=V.sub(pi,pj);
+      const L=V.len(d)||1e-6;
+      const invMassSum = invm[i]+invm[j] || 1e-6;
+      const corr = V.mul(d, (1.0 - rest/L) * stiff);
+      // distribute according to masses
+      if(invm[i]>0){ pos[ix]-=corr[0]*(invm[i]/invMassSum); pos[ix+1]-=corr[1]*(invm[i]/invMassSum); pos[ix+2]-=corr[2]*(invm[i]/invMassSum); }
+      if(invm[j]>0){ pos[jx]+=corr[0]*(invm[j]/invMassSum); pos[jx+1]+=corr[1]*(invm[j]/invMassSum); pos[jx+2]+=corr[2]*(invm[j]/invMassSum); }
+    }
+    // plane collision
+    collideWithPlane();
+    // hand spheres collision
+    handCollision();
+    // grabbed particles get pinned last for stability
+    applyGrabs();
+  }
+}
+
+/* ------------------------ Plane & hit-test reticle ----------------------- */
+let planeSet = false;
+let planePoint = [0, 0.75, 0];
+let planeNormal = [0, 1, 0]; // upward
+let reticleActive = false;
+let reticleModel = new Float32Array(mat4Identity());
+
+function collideWithPlane(){
+  const N = planeNormal;
+  const P0 = planePoint;
+  for(let i=0;i<NPTS;i++){
+    if(invm[i]===0) continue; // grabbed: skip here (will project later)
+    const ix=3*i;
+    const p=[pos[ix],pos[ix+1],pos[ix+2]];
+    const d = V.dot(V.sub(p,P0), N);
+    if(d<0){
+      const corr = V.mul(N, -d);
+      pos[ix]+=corr[0]; pos[ix+1]+=corr[1]; pos[ix+2]+=corr[2];
+      // basic friction: drag along plane normal damping previous
+      prev[ix]+=corr[0]*0.6; prev[ix+1]+=corr[1]*0.6; prev[ix+2]+=corr[2]*0.6;
+    }
+  }
+}
+
+/* ------------------------------ Hand input ------------------------------ */
+const hands = { left: null, right: null };
+const handState = {
+  left:  { pinch:false, wasPinch:false, pinchPos:[0,0,0], grabId:-1 },
+  right: { pinch:false, wasPinch:false, pinchPos:[0,0,0], grabId:-1 }
+};
+const PALM_RAD = 0.07; // meters
+
+function handCollision(){
+  // Push cloth out of palm spheres (keeps sheet from tunneling into hands)
+  for(const side of ['left','right']){
+    const h = hands[side]; if(!h) continue;
+    const palmp = h.palm;
+    if(!palmp) continue;
+    const c = [palmp.x, palmp.y, palmp.z];
+    const r = PALM_RAD;
+    for(let i=0;i<NPTS;i++){
+      const ix = 3*i;
+      const p = [pos[ix],pos[ix+1],pos[ix+2]];
+      const d = V.sub(p,c);
+      const L = V.len(d);
+      if(L < r){
+        const n = L>1e-6 ? V.mul(d, 1/L) : [0,1,0];
+        const corr = V.mul(n, r-L);
+        pos[ix]+=corr[0]; pos[ix+1]+=corr[1]; pos[ix+2]+=corr[2];
+      }
+    }
+  }
+}
+
+function applyGrabs(){
+  for(const side of ['left','right']){
+    const st = handState[side];
+    if(st.grabId>=0){
+      const g = st.grabId;
+      const ix = 3*g;
+      // pin particle to pinch position (acts as kinematic target)
+      pos[ix] = st.pinchPos[0];
+      pos[ix+1] = st.pinchPos[1];
+      pos[ix+2] = st.pinchPos[2];
+      prev[ix]=pos[ix]; prev[ix+1]=pos[ix+1]; prev[ix+2]=pos[ix+2];
+    }
+  }
+}
+
+function nearestParticle(to, maxR = PICK_RADIUS){
+  let best=-1, bestD=maxR;
+  for(let i=0;i<NPTS;i++){
+    const ix=3*i;
+    const p=[pos[ix],pos[ix+1],pos[ix+2]];
+    const d = V.len(V.sub(p,to));
+    if(d<bestD){ bestD=d; best=i; }
+  }
+  return best;
+}
+
+function updateHands(frame){
+  // Build a lightweight per-hand snapshot of key joints
+  for(const input of session.inputSources){
+    if(!input.hand) continue;
+    const handedness = input.handedness; // 'left'|'right'
+    const hand = input.hand;
+
+    function jp(name){
+      const space = hand.get(name);
+      if(!space) return null;
+      const pose = frame.getJointPose(space, refSpace);
+      return pose ? pose.transform.position : null;
+    }
+    const thumb = jp('thumb-tip');
+    const index = jp('index-finger-tip');
+    const palmP = jp('wrist') || jp('index-finger-metacarpal'); // approx center
+
+    // Save
+    hands[handedness] = { thumb, index, palm: palmP };
+
+    // Pinch detection
+    const st = handState[handedness];
+    st.wasPinch = st.pinch;
+    if(thumb && index){
+      const d = Math.hypot(thumb.x-index.x, thumb.y-index.y, thumb.z-index.z);
+      st.pinch = d < 0.03; // ~3 cm
+      if(st.pinch){
+        st.pinchPos = [(thumb.x+index.x)/2, (thumb.y+index.y)/2, (thumb.z+index.z)/2];
+      }
+    } else {
+      st.pinch = false;
+    }
+
+    // Grab begin
+    if(st.pinch && !st.wasPinch){
+      // If we haven't set the plane yet, a pinch over a valid reticle places it.
+      if(!planeSet && reticleActive){
+        placePlaneAndSpawnFromReticle();
+      } else {
+        // Try to pick a particle near pinch
+        const id = nearestParticle(st.pinchPos, PICK_RADIUS);
+        if(id>=0){
+          st.grabId = id;
+          invm[id] = 0.0; // pin while grabbed
         }
       }
-      const idx = (x,y)=> y*(segX+1)+x;
-      const addC=(a,b)=> cloth.constraints.push([a,b, cloth.particles[a].pos.distanceTo(cloth.particles[b].pos)]);
-      for (let y=0;y<=segY;y++){
-        for (let x=0;x<=segX;x++){
-          if (x<segX) addC(idx(x,y), idx(x+1,y));
-          if (y<segY) addC(idx(x,y), idx(x,y+1));
-          if (x<segX && y<segY){ addC(idx(x,y), idx(x+1,y+1)); addC(idx(x+1,y), idx(x,y+1)); }
-        }
-      }
-      // Geometry
-      const geo = new THREE.PlaneGeometry(w, h, segX, segY);
-      geo.rotateX(-Math.PI/2); // make plane horizontal XY -> XZ
-      const posAttr = geo.getAttribute('position');
-      // texture-less soft lambert
-      const mat = new THREE.MeshStandardMaterial({ color: 0x98c1ff, roughness:0.9, metalness:0.0, side: THREE.DoubleSide });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.castShadow = false; mesh.receiveShadow = false;
-      mesh.frustumCulled = false;
-      scene.add(mesh);
-      cloth.mesh = mesh; cloth.posAttr = posAttr;
-      // map geometry vertices to particle indices in row‑major order after rotateX
-      cloth.vertToParticle = [];
-      const verts = (segX+1)*(segY+1);
-      for (let i=0;i<verts;i++) cloth.vertToParticle[i] = i; // due to matching construction
     }
-
-    function simulateCloth(dt, xrFrame, referenceSpace){
-      const { particles, gravity, damping, constraints, pinned } = cloth;
-      // Integrate (Verlet)
-      const dt2 = dt*dt;
-      for (let i=0;i<particles.length;i++){
-        if (pinned.has(i)) continue;
-        const p = particles[i];
-        const tmp = p.pos.clone();
-        const accel = gravity.clone().multiplyScalar(p.invMass);
-        p.pos.add(p.pos.clone().sub(p.prev).multiplyScalar(damping)).add(accel.multiplyScalar(dt2));
-        p.prev.copy(tmp);
-      }
-      // Collide with table plane (if known)
-      if (tablePlane){
-        const n = tablePlane.normal; const d = tablePlane.constant; // plane eq: n·x + d = 0
-        for (let i=0;i<particles.length;i++){
-          const p = particles[i];
-          const dist = n.dot(p.pos) + d; // >0 above
-          if (dist < 0){
-            // Project out of plane + friction-lite
-            p.pos.addScaledVector(n, -dist);
-            // simple velocity damp along tangent
-            const v = p.pos.clone().sub(p.prev);
-            const normalV = n.clone().multiplyScalar(v.dot(n));
-            const tangentV = v.sub(normalV).multiplyScalar(0.7);
-            p.prev.copy(p.pos.clone().sub(normalV.add(tangentV)));
-          }
-        }
-      }
-      // Collide with hands (spheres around joints) + grabbing
-      if (xrFrame && session){
-        for (const inputSource of session.inputSources){
-          if (inputSource.hand){
-            const hand = inputSource.hand;
-            // Pinch detection (thumb tip + index tip)
-            const tTip = hand.get('thumb-tip');
-            const iTip = hand.get('index-finger-tip');
-            const tPose = tTip && xrFrame.getJointPose(tTip, referenceSpace);
-            const iPose = iTip && xrFrame.getJointPose(iTip, referenceSpace);
-            let pinch = false, pinchPos = null, pinchRadius = 0.02;
-            if (tPose && iPose){
-              const dist = Math.hypot(
-                tPose.transform.position.x - iPose.transform.position.x,
-                tPose.transform.position.y - iPose.transform.position.y,
-                tPose.transform.position.z - iPose.transform.position.z
-              );
-              pinch = dist < 0.03; // ~3 cm threshold
-              if (pinch){ // midpoint as grab point
-                pinchPos = new THREE.Vector3(
-                  (tPose.transform.position.x + iPose.transform.position.x)/2,
-                  (tPose.transform.position.y + iPose.transform.position.y)/2,
-                  (tPose.transform.position.z + iPose.transform.position.z)/2
-                );
-              }
-            }
-            // Per‑joint collision spheres
-            const jointNames = ['index-finger-tip','middle-finger-tip','ring-finger-tip','pinky-finger-tip','thumb-tip','wrist'];
-            for (const jn of jointNames){
-              const j = hand.get(jn);
-              const jp = j && xrFrame.getJointPose(j, referenceSpace);
-              if (!jp) continue;
-              const r = Math.max(jp.radius || 0.015, 0.014);
-              const center = new THREE.Vector3(jp.transform.position.x, jp.transform.position.y, jp.transform.position.z);
-              for (let i=0;i<particles.length;i++){
-                const p = particles[i];
-                const dir = p.pos.clone().sub(center);
-                const len = dir.length();
-                const minR = r + 0.008; // small shell to avoid stickiness
-                if (len < minR){
-                  if (len < 1e-4) dir.set(0,1,0); else dir.multiplyScalar((minR - len)/len);
-                  p.pos.add(dir);
-                }
-              }
-              // Grabbing: pin nearest particle to pinch point
-              if (pinch && pinchPos){
-                let nearest = -1, best = 1e9;
-                for (let i=0;i<particles.length;i++){
-                  const d = particles[i].pos.distanceTo(pinchPos);
-                  if (d < best){ best = d; nearest = i; }
-                }
-                if (nearest>=0 && best < 0.06){
-                  // Pin while pinch is active: move particle to pinchPos each step
-                  const p = particles[nearest];
-                  p.prev.copy(pinchPos);
-                  p.pos.copy(pinchPos);
-                  cloth.pinned.add(nearest);
-                }
-              } else {
-                // release all pins once pinch ends (but keep any corner pins none)
-                for (const i of [...cloth.pinned]){
-                  if (!cornerPins.has(i)) cloth.pinned.delete(i);
-                }
-              }
-            }
-          }
-        }
-      }
-      // Satisfy constraints (distance)
-      for (let k=0;k<constraints.length;k++){
-        const [ia, ib, rest] = constraints[k];
-        const a = particles[ia], b = particles[ib];
-        const delta = b.pos.clone().sub(a.pos);
-        const d = delta.length() || 1e-6;
-        const diff = (d - rest) / d;
-        const invA = a.invMass, invB = b.invMass; const sum = invA + invB;
-        if (sum === 0) continue;
-        const corr = delta.multiplyScalar(0.5*diff);
-        if (!cloth.pinned.has(ia)) a.pos.addScaledVector(corr, 1);
-        if (!cloth.pinned.has(ib)) b.pos.addScaledVector(corr, -1);
-      }
-      // Write back to geometry
-      const pa = cloth.posAttr;
-      const v = new THREE.Vector3();
-      for (let i=0;i<pa.count;i++){
-        const p = cloth.particles[ cloth.vertToParticle[i] ].pos;
-        v.copy(p); // cloth built in XZ plane; geometry already rotated
-        pa.setXYZ(i, v.x, v.y, v.z);
-      }
-      pa.needsUpdate = true;
-      cloth.mesh.computeVertexNormals();
-    }
-
-    // Corner pins (lightly hold two corners at spawn, then release once dropped)
-    const cornerPins = new Set();
-
-    function resetClothAboveTable(){
-      buildCloth();
-      cornerPins.clear();
-      // Pin two corners briefly so it spawns tidy above the table
-      const segX = cloth.segX, segY = cloth.segY;
-      const idx = (x,y)=> y*(segX+1)+x;
-      const a = idx(0,0), b = idx(segX,0);
-      cloth.pinned.add(a); cloth.pinned.add(b);
-      cornerPins.add(a); cornerPins.add(b);
-      setTimeout(()=>{ for (const i of cornerPins) cloth.pinned.delete(i); cornerPins.clear(); }, 1200);
-    }
-
-    // --- Table plane detection ---
-    let session = null, referenceSpace = null, viewerSpace = null, hitTestSource = null;
-    let planeDetector = null, tablePlane = null; // { normal:Vector3, constant:Number }
-
-    async function selectTablePlane(xrFrame){
-      // Prefer plane-detection: choose largest near-horizontal plane below the cloth spawn height
-      if (session.requestReferenceSpace && session.requestHitTestSource && session.requestHitTestSourceForTransientInput){}
-      if ('planeDetection' in session && session.planeDetection){
-        planeDetector = await session.requestPlaneDetection();
+    // Grab end
+    if(!st.pinch && st.wasPinch){
+      if(st.grabId>=0){
+        invm[st.grabId] = 1.0;
+        st.grabId = -1;
       }
     }
+  }
+}
 
-    function updatePlaneFromAPI(xrFrame){
-      if (!planeDetector) return false;
-      const planes = xrFrame.detectedPlanes || planeDetector.detectedPlanes; // browser differences
-      if (!planes || planes.size === 0) return false;
-      let best = null; let bestArea = 0;
-      for (const p of planes){
-        const pose = xrFrame.getPose(p.planeSpace || p, referenceSpace);
-        if (!pose) continue;
-        // Plane normal is +Y of its space by convention
-        const n = new THREE.Vector3(0,1,0).applyQuaternion(new THREE.Quaternion(
-          pose.transform.orientation.x,
-          pose.transform.orientation.y,
-          pose.transform.orientation.z,
-          pose.transform.orientation.w
-        ));
-        // check near-horizontal
-        if (Math.abs(n.y) < 0.7) continue;
-        // estimate area from polygon (if provided)
-        let area = 0;
-        const poly = p.polygon || p.polygonVertices || [];
-        for (let i=1;i+1<poly.length;i++){
-          const ax = poly[0].x, ay = poly[0].y;
-          const bx = poly[i].x, by = poly[i].y;
-          const cx = poly[i+1].x, cy = poly[i+1].y;
-          area += Math.abs((bx-ax)*(cy-ay) - (cx-ax)*(by-ay));
-        }
-        if (area > bestArea){ bestArea = area; best = { pose, n } }
-      }
-      if (best){
-        const p = new THREE.Vector3(best.pose.transform.position.x, best.pose.transform.position.y, best.pose.transform.position.z);
-        const n = best.n.normalize();
-        tablePlane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, p);
-        note.textContent = 'Table locked';
-        return true;
-      }
-      return false;
+/* ------------------------------- Reticle -------------------------------- */
+function buildReticleGeometry(){
+  const ring = [];
+  const R = 0.08, N = 48;
+  for(let i=0;i<N;i++){
+    const t = (i/N)*Math.PI*2;
+    ring.push(Math.cos(t)*R, 0, Math.sin(t)*R);
+  }
+  bufReticle = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufReticle);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(ring), gl.STATIC_DRAW);
+}
+
+/* --------------------------- Cloth GL buffers --------------------------- */
+function initClothBuffers(){
+  bufPos = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, bufPos); gl.bufferData(gl.ARRAY_BUFFER, pos, gl.DYNAMIC_DRAW);
+  bufNor = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, bufNor); gl.bufferData(gl.ARRAY_BUFFER, nor, gl.DYNAMIC_DRAW);
+  bufUV  = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, bufUV); gl.bufferData(gl.ARRAY_BUFFER, uv,  gl.STATIC_DRAW);
+  bufIdx = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufIdx); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+}
+function updateClothBuffers(){
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufPos); gl.bufferSubData(gl.ARRAY_BUFFER, 0, pos);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufNor); gl.bufferSubData(gl.ARRAY_BUFFER, 0, nor);
+}
+
+/* ------------------------------ Rendering ------------------------------- */
+function drawCloth(view, viewMat, projMat){
+  gl.useProgram(progMain);
+  // attributes
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufPos);
+  gl.enableVertexAttribArray(loc.aPos);
+  gl.vertexAttribPointer(loc.aPos, 3, gl.FLOAT, false, 0, 0);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufNor);
+  gl.enableVertexAttribArray(loc.aNor);
+  gl.vertexAttribPointer(loc.aNor, 3, gl.FLOAT, false, 0, 0);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufUV);
+  gl.enableVertexAttribArray(loc.aUV);
+  gl.vertexAttribPointer(loc.aUV, 2, gl.FLOAT, false, 0, 0);
+
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufIdx);
+
+  // uniforms
+  gl.uniformMatrix4fv(loc.uProj, false, projMat);
+  gl.uniformMatrix4fv(loc.uView, false, viewMat);
+  gl.uniformMatrix4fv(loc.uModel, false, mat4Identity());
+  const eye = view.transform.position;
+  gl.uniform3f(loc.uEye, eye.x, eye.y, eye.z);
+  gl.uniform3f(loc.uLightDir, 0.4, 0.9, 0.3);
+  gl.uniform3f(loc.uBaseColor, 0.85, 0.25, 0.25);
+  gl.uniform1f(loc.uMetal, 0.0);
+  gl.uniform1f(loc.uRough, 0.35);
+
+  gl.enable(gl.CULL_FACE);
+  gl.enable(gl.DEPTH_TEST);
+  gl.drawElements(gl.TRIANGLES, idx.length, gl.UNSIGNED_SHORT, 0);
+}
+
+function drawReticle(viewMat, projMat, color=[0.2,1,0.6,1]){
+  if(!reticleActive) return;
+  gl.useProgram(progLine);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufReticle);
+  gl.enableVertexAttribArray(loc2.aPos);
+  gl.vertexAttribPointer(loc2.aPos, 3, gl.FLOAT, false, 0, 0);
+  gl.uniformMatrix4fv(loc2.uProj, false, projMat);
+  gl.uniformMatrix4fv(loc2.uView, false, viewMat);
+  gl.uniformMatrix4fv(loc2.uModel, false, reticleModel);
+  gl.uniform4f(loc2.uColor, color[0],color[1],color[2],color[3]);
+  gl.disable(gl.DEPTH_TEST);
+  gl.drawArrays(gl.LINE_LOOP, 0, 48);
+}
+
+/* ------------------------------ AR session ------------------------------ */
+const msg = document.getElementById('msg');
+const statusDot = document.getElementById('statusDot');
+function setMsg(s){ msg.textContent = s; }
+function setDot(ok){ statusDot.style.background = ok ? '#8fd' : '#f66'; }
+
+async function enterAR(){
+  if(!navigator.xr) { setMsg('WebXR not available.'); setDot(false); return; }
+  createGL();
+  initPrograms();
+  buildReticleGeometry();
+  setMsg('Requesting AR session…');
+
+  session = await navigator.xr.requestSession('immersive-ar', {
+    requiredFeatures: ['local-floor','hit-test'],
+    optionalFeatures: ['hand-tracking','dom-overlay','anchors','bounded-floor'],
+    domOverlay: { root: document.body }
+  });
+
+  await gl.makeXRCompatible();
+  baseLayer = new XRWebGLLayer(session, gl, { alpha:true, antialias:true });
+  session.updateRenderState({ baseLayer });
+
+  refSpace = await session.requestReferenceSpace('local-floor');
+  viewerSpace = await session.requestReferenceSpace('viewer');
+  hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+
+  session.addEventListener('end', ()=>{ setMsg('Session ended.'); setDot(false); });
+  session.addEventListener('inputsourceschange', ()=>{ /* keep default */ });
+
+  // Prepare initial cloth (spawns when plane is placed)
+  initClothAt([0,1.2, -0.5]);
+
+  initClothBuffers();
+
+  setMsg('Look at your table until the reticle locks; pinch to place.');
+  setDot(true);
+
+  session.requestAnimationFrame(onXRFrame);
+}
+
+function placePlaneAndSpawnFromReticle(){
+  // plane from reticle pose
+  const q = quatFromMat(reticleModel);
+  const n = V.norm(quatToBasisY(q)); // approximate surface normal
+  planePoint = [reticleModel[12], reticleModel[13], reticleModel[14]];
+  planeNormal = (n[1] < 0 ? V.mul(n,-1) : n); // ensure roughly upward
+  planeSet = true;
+  // spawn cloth slightly above plane center
+  const right = [1,0,0], up = [0,0,-1]; // sheet local axes (arbitrary)
+  const spawn = V.add(planePoint, V.mul(planeNormal, 0.35));
+  initClothAt(spawn, right, up);
+  initClothBuffers();
+  setMsg('Plane placed. Pinch near the cloth to grab; release to drop.');
+}
+
+function resetAll(){
+  planeSet = false;
+  reticleActive = false;
+  // light reset of cloth (it will drop when plane is set)
+  initClothAt([0,1.2,-0.5]);
+  initClothBuffers();
+  setMsg('Reset. Look at the table and pinch to place the plane.');
+  // release grabs
+  for(const s of ['left','right']){
+    const st=handState[s];
+    if(st.grabId>=0){ invm[st.grabId]=1.0; st.grabId=-1; }
+  }
+}
+
+let lastTime = 0;
+function onXRFrame(t, frame){
+  const dt = lastTime ? Math.min((t - lastTime)/1000, 1/30) : 1/90;
+  lastTime = t;
+
+  const pose = frame.getViewerPose(refSpace);
+  if(!pose){ session.requestAnimationFrame(onXRFrame); return; }
+
+  // Hit test for reticle (until plane is set)
+  if(!planeSet && hitTestSource){
+    const hits = frame.getHitTestResults(hitTestSource);
+    if(hits.length){
+      const hit = hits[0];
+      const hitPose = hit.getPose(refSpace);
+      reticleActive = true;
+      reticleModel = mat4FromPose(hitPose.transform);
+    } else {
+      reticleActive = false;
     }
+  }
 
-    async function setupHitTest(){
-      viewerSpace = await session.requestReferenceSpace('viewer');
-      hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
-    }
+  // Hand updates
+  updateHands(frame);
 
-    function updatePlaneFromHitTest(xrFrame){
-      if (tablePlane) return true;
-      if (!hitTestSource) return false;
-      const hits = xrFrame.getHitTestResults(hitTestSource);
-      if (hits.length){
-        const hit = hits[0];
-        const pose = hit.getPose(referenceSpace);
-        if (pose){
-          const p = new THREE.Vector3(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z);
-          // Assume horizontal plane facing up
-          const n = new THREE.Vector3(0,1,0);
-          tablePlane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, p);
-          note.textContent = 'Table set (hit‑test)';
-          return true;
-        }
-      }
-      return false;
-    }
+  // Step simulation
+  const step = (dt / SUBSTEPS);
+  for(let s=0;s<SUBSTEPS;s++){
+    integrate(step);
+    satisfyConstraints();
+  }
+  recomputeNormals();
+  updateClothBuffers();
 
-    // --- Session start ---
-    startBtn.onclick = async () => {
-      if (!supported) return;
-      try{
-        session = await navigator.xr.requestSession('immersive-ar', {
-          requiredFeatures,
-          optionalFeatures,
-          // dom-overlay requires a root element; we just reuse body
-          domOverlay: { root: document.body },
-        });
-      } catch (e){
-        alert('Failed to start AR session: '+e.message);
-        return;
-      }
+  // Render per-eye
+  gl.bindFramebuffer(gl.FRAMEBUFFER, baseLayer.framebuffer);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-      enterUI.style.display = 'none';
-      hud.hidden = false;
+  for(const view of pose.views){
+    const vp = baseLayer.getViewport(view);
+    gl.viewport(vp.x, vp.y, vp.width, vp.height);
 
-      renderer.xr.setReferenceSpaceType('local');
-      renderer.xr.setSession(session);
+    const proj = view.projectionMatrix;
+    const viewMat = mat4InverseRigid(view.transform.matrix);
 
-      referenceSpace = await session.requestReferenceSpace('local');
+    // Reticle (before cloth so it overlays cleanly; depth test off there)
+    drawReticle(viewMat, proj);
 
-      // Add visual hand models
-      for (let i=0;i<2;i++){
-        const hand = renderer.xr.getHand(i);
-        const model = handFactory.createHandModel(hand, 'boxes');
-        hand.add(model);
-        scene.add(hand); hands.push(hand);
-      }
+    // Cloth
+    drawCloth(view, viewMat, proj);
+  }
 
-      await setupHitTest();
-      await selectTablePlane();
+  session.requestAnimationFrame(onXRFrame);
+}
 
-      resetClothAboveTable();
+/* ------------------------------- UI wiring ------------------------------ */
+document.getElementById('enter').addEventListener('click', ()=>{
+  enterAR().catch(err=>{
+    console.error(err);
+    setMsg('Failed to start AR: ' + err.message);
+    setDot(false);
+  });
+});
+document.getElementById('reset').addEventListener('click', resetAll);
 
-      session.addEventListener('select', () => { tablePlane = null; note.textContent = 'Tap a surface to set table…'; });
-
-      renderer.setAnimationLoop((t,frame)=>{
-        const dt = Math.min(1/30, renderer.xr.isPresenting ? (renderer.xr.getFrame()?.deltaTime||16)/1000 : 1/60);
-        if (frame){
-          if (!tablePlane){
-            if (!updatePlaneFromAPI(frame)) updatePlaneFromHitTest(frame);
-          }
-          simulateCloth(dt, frame, referenceSpace);
-        }
-        renderer.render(scene, camera);
-      });
-    };
-
-    // Non‑AR fallback: show the cloth in a normal 3D scene (no permissions needed)
-    let nonARActive = false;
-    function startNonARMode(){
-      if (nonARActive) return; nonARActive = true;
-      log('Starting Non‑AR demo mode (no WebXR).');
-      enterUI.style.display = 'none'; hud.hidden = false; note.textContent = 'Non‑AR demo — no camera passthrough';
-      tablePlane = new THREE.Plane(new THREE.Vector3(0,1,0), 0); // y=0 plane
-      camera.position.set(0.8, 0.7, 1.2); camera.lookAt(0,0,0);
-      resetClothAboveTable();
-      const clock = new THREE.Clock();
-      function loop(){
-        const dt = Math.min(1/30, clock.getDelta());
-        simulateCloth(dt, null, null);
-        renderer.render(scene, camera);
-        if (nonARActive) requestAnimationFrame(loop);
-      }
-      loop();
-    }
-    startNonAR?.addEventListener('click', startNonARMode);
-
-    // Diagnostics button
-    runDiag?.addEventListener('click', async ()=>{
-      log('--- Diagnostics ---');
-      log('UserAgent:', navigator.userAgent);
-      log('Secure context:', window.isSecureContext, 'protocol:', location.protocol);
-      log('Visibility:', document.visibilityState);
-      log('Navigator.xr present:', !!navigator.xr);
-      try{ const a = await navigator.xr?.isSessionSupported?.('immersive-ar'); log('isSessionSupported(immersive-ar):', a); }catch(e){ log('isSessionSupported AR error:', e?.message||e); }
-      try{ const v = await navigator.xr?.isSessionSupported?.('immersive-vr'); log('isSessionSupported(immersive-vr):', v); }catch(e){ log('isSessionSupported VR error:', e?.message||e); }
-      if (navigator.xr){
-        try{
-          const test = await navigator.xr.requestSession('immersive-ar', { requiredFeatures: ['hand-tracking'] });
-          log('requestSession probe: SUCCESS');
-          await test.end();
-        }catch(e){ log('requestSession probe FAILED:', e?.name||'', e?.message||e); }
-      }
-      log('--- End Diagnostics ---');
-    });
-
-    copyLog?.addEventListener('click', ()=>{ try{ navigator.clipboard.writeText(logDiv.textContent||''); log('Copied log to clipboard'); }catch(e){ log('Clipboard copy failed:', e?.message||e); } });
-
-    reloadBtn.onclick = ()=>{ tablePlane = null; resetClothAboveTable(); note.textContent = 'Reset. Scanning for table…'; };
-
-    // Resize
-    addEventListener('resize', ()=>{
-      camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
-      renderer.setSize(innerWidth, innerHeight);
-    });
-
-  </script>
-  <div id="log" style="position:fixed;top:8px;left:8px;right:8px;max-height:38vh;overflow:auto;font:12px/1.3 monospace;color:#e3f2fd;background:rgba(0,0,0,.5);padding:8px;border-radius:10px;display:none"></div>
+setMsg('Ready. Tap "Enter Mixed Reality" on Quest 3.');
+setDot(false);
+</script>
 </body>
 </html>
