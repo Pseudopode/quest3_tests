@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Quest 3 MR Cloth (hand + table)</title>
+  <style>
+    html,body { margin:0; height:100%; overflow:hidden; background:#000; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    #enter { position: fixed; inset: 0; display: grid; place-items: center; background: #0b0b0b; color: #fff; }
+    #enter button { font-size: 18px; padding: 14px 18px; border: 0; border-radius: 14px; background: #1e90ff; color:#fff; box-shadow: 0 10px 30px rgba(30,144,255,.35); }
+    #hud { position: fixed; left: 12px; right: 12px; bottom: 12px; display:flex; gap:8px; align-items:center; justify-content:space-between; pointer-events:none; }
+    #note { pointer-events:none; color:#fff; background: rgba(0,0,0,.45); padding: 8px 10px; border-radius: 12px; font-size: 14px; line-height: 1.2; }
+    #reload { pointer-events:auto; padding: 8px 12px; border-radius: 10px; border: 0; background: rgba(255,255,255,.12); color:#fff; }
+  </style>
+</head>
+<body>
+  <div id="enter">
+    <div style="display:grid;gap:16px;place-items:center;text-align:center;max-width:640px;padding:24px">
+      <h1 style="margin:0;color:white">Quest 3 Mixed‑Reality Cloth</h1>
+      <p style="color:#cfd8dc;margin:0">Loads in <b>immersive‑AR</b> with <b>hand‑tracking</b>, <b>plane‑detection</b>, and <b>hit‑test</b>. 
+        Pinch your thumb + index to grab the cloth. Release to drop. 
+        Tap A/X (or air‑tap) to choose your table if the auto table pick fails.</p>
+      <button id="start">Enter Mixed Reality</button>
+      <small style="color:#9aa6b2">Tip: Give the app motion permission in the Quest Browser if prompted.</small>
+    </div>
+  </div>
+  <div id="hud" hidden>
+    <div id="note">Scanning for a horizontal table…</div>
+    <button id="reload" title="Reset cloth">Reset cloth</button>
+  </div>
+  <script type="module">
+    // --- Minimal Three.js via ESM (lightweight single import) ---
+    import * as THREE from 'https://unpkg.com/three@0.161.0/build/three.module.js';
+    import { XRHandModelFactory } from 'https://unpkg.com/three@0.161.0/examples/jsm/webxr/XRHandModelFactory.js';
+
+    // Feature checks
+    const supported = navigator.xr && await navigator.xr.isSessionSupported?.('immersive-ar');
+    const requiredFeatures = ['hand-tracking','hit-test'];
+    const optionalFeatures = ['plane-detection','anchors','dom-overlay','layers'];
+
+    const enterUI = document.getElementById('enter');
+    const startBtn = document.getElementById('start');
+    const hud = document.getElementById('hud');
+    const note = document.getElementById('note');
+    const reloadBtn = document.getElementById('reload');
+
+    if (!supported) startBtn.textContent = 'WebXR AR not supported here';
+
+    // --- THREE setup ---
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(devicePixelRatio);
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.01, 100);
+
+    // Lighting (for cloth shading)
+    const light = new THREE.HemisphereLight(0xffffff, 0x444444, 1.0);
+    scene.add(light);
+
+    // Hands (for debugging/visuals; physics uses raw joints)
+    const handFactory = new XRHandModelFactory();
+    const hands = [];
+
+    // --- Cloth (particle-based, CPU, Verlet) ---
+    const cloth = {
+      w: 1.0, // meters
+      h: 1.0,
+      segX: 25,
+      segY: 25,
+      gravity: new THREE.Vector3(0, -9.8, 0),
+      damping: 0.995,
+      iterations: 5,
+      restDist: 0,
+      pinned: new Set(),
+      particles: [], // { pos:Vector3, prev:Vector3, invMass:number }
+      constraints: [] // [iA, iB, restLen]
+    };
+
+    function buildCloth() {
+      cloth.particles.length = 0; cloth.constraints.length = 0; cloth.pinned.clear();
+      const { segX, segY, w, h } = cloth;
+      const dx = w/segX, dy = h/segY; cloth.restDist = Math.min(dx,dy);
+      for (let y=0;y<=segY;y++){
+        for (let x=0;x<=segX;x++){
+          const u = x/segX, v = y/segY;
+          const pos = new THREE.Vector3((u-0.5)*w, 0.6 + 0.25, (v-0.5)*h); // start above table
+          const prev = pos.clone();
+          cloth.particles.push({ pos, prev, invMass: 1.0 });
+        }
+      }
+      const idx = (x,y)=> y*(segX+1)+x;
+      const addC=(a,b)=> cloth.constraints.push([a,b, cloth.particles[a].pos.distanceTo(cloth.particles[b].pos)]);
+      for (let y=0;y<=segY;y++){
+        for (let x=0;x<=segX;x++){
+          if (x<segX) addC(idx(x,y), idx(x+1,y));
+          if (y<segY) addC(idx(x,y), idx(x,y+1));
+          if (x<segX && y<segY){ addC(idx(x,y), idx(x+1,y+1)); addC(idx(x+1,y), idx(x,y+1)); }
+        }
+      }
+      // Geometry
+      const geo = new THREE.PlaneGeometry(w, h, segX, segY);
+      geo.rotateX(-Math.PI/2); // make plane horizontal XY -> XZ
+      const posAttr = geo.getAttribute('position');
+      // texture-less soft lambert
+      const mat = new THREE.MeshStandardMaterial({ color: 0x98c1ff, roughness:0.9, metalness:0.0, side: THREE.DoubleSide });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.castShadow = false; mesh.receiveShadow = false;
+      mesh.frustumCulled = false;
+      scene.add(mesh);
+      cloth.mesh = mesh; cloth.posAttr = posAttr;
+      // map geometry vertices to particle indices in row‑major order after rotateX
+      cloth.vertToParticle = [];
+      const verts = (segX+1)*(segY+1);
+      for (let i=0;i<verts;i++) cloth.vertToParticle[i] = i; // due to matching construction
+    }
+
+    function simulateCloth(dt, xrFrame, referenceSpace){
+      const { particles, gravity, damping, constraints, pinned } = cloth;
+      // Integrate (Verlet)
+      const dt2 = dt*dt;
+      for (let i=0;i<particles.length;i++){
+        if (pinned.has(i)) continue;
+        const p = particles[i];
+        const tmp = p.pos.clone();
+        const accel = gravity.clone().multiplyScalar(p.invMass);
+        p.pos.add(p.pos.clone().sub(p.prev).multiplyScalar(damping)).add(accel.multiplyScalar(dt2));
+        p.prev.copy(tmp);
+      }
+      // Collide with table plane (if known)
+      if (tablePlane){
+        const n = tablePlane.normal; const d = tablePlane.constant; // plane eq: n·x + d = 0
+        for (let i=0;i<particles.length;i++){
+          const p = particles[i];
+          const dist = n.dot(p.pos) + d; // >0 above
+          if (dist < 0){
+            // Project out of plane + friction-lite
+            p.pos.addScaledVector(n, -dist);
+            // simple velocity damp along tangent
+            const v = p.pos.clone().sub(p.prev);
+            const normalV = n.clone().multiplyScalar(v.dot(n));
+            const tangentV = v.sub(normalV).multiplyScalar(0.7);
+            p.prev.copy(p.pos.clone().sub(normalV.add(tangentV)));
+          }
+        }
+      }
+      // Collide with hands (spheres around joints) + grabbing
+      if (xrFrame && session){
+        for (const inputSource of session.inputSources){
+          if (inputSource.hand){
+            const hand = inputSource.hand;
+            // Pinch detection (thumb tip + index tip)
+            const tTip = hand.get('thumb-tip');
+            const iTip = hand.get('index-finger-tip');
+            const tPose = tTip && xrFrame.getJointPose(tTip, referenceSpace);
+            const iPose = iTip && xrFrame.getJointPose(iTip, referenceSpace);
+            let pinch = false, pinchPos = null, pinchRadius = 0.02;
+            if (tPose && iPose){
+              const dist = Math.hypot(
+                tPose.transform.position.x - iPose.transform.position.x,
+                tPose.transform.position.y - iPose.transform.position.y,
+                tPose.transform.position.z - iPose.transform.position.z
+              );
+              pinch = dist < 0.03; // ~3 cm threshold
+              if (pinch){ // midpoint as grab point
+                pinchPos = new THREE.Vector3(
+                  (tPose.transform.position.x + iPose.transform.position.x)/2,
+                  (tPose.transform.position.y + iPose.transform.position.y)/2,
+                  (tPose.transform.position.z + iPose.transform.position.z)/2
+                );
+              }
+            }
+            // Per‑joint collision spheres
+            const jointNames = ['index-finger-tip','middle-finger-tip','ring-finger-tip','pinky-finger-tip','thumb-tip','wrist'];
+            for (const jn of jointNames){
+              const j = hand.get(jn);
+              const jp = j && xrFrame.getJointPose(j, referenceSpace);
+              if (!jp) continue;
+              const r = Math.max(jp.radius || 0.015, 0.014);
+              const center = new THREE.Vector3(jp.transform.position.x, jp.transform.position.y, jp.transform.position.z);
+              for (let i=0;i<particles.length;i++){
+                const p = particles[i];
+                const dir = p.pos.clone().sub(center);
+                const len = dir.length();
+                const minR = r + 0.008; // small shell to avoid stickiness
+                if (len < minR){
+                  if (len < 1e-4) dir.set(0,1,0); else dir.multiplyScalar((minR - len)/len);
+                  p.pos.add(dir);
+                }
+              }
+              // Grabbing: pin nearest particle to pinch point
+              if (pinch && pinchPos){
+                let nearest = -1, best = 1e9;
+                for (let i=0;i<particles.length;i++){
+                  const d = particles[i].pos.distanceTo(pinchPos);
+                  if (d < best){ best = d; nearest = i; }
+                }
+                if (nearest>=0 && best < 0.06){
+                  // Pin while pinch is active: move particle to pinchPos each step
+                  const p = particles[nearest];
+                  p.prev.copy(pinchPos);
+                  p.pos.copy(pinchPos);
+                  cloth.pinned.add(nearest);
+                }
+              } else {
+                // release all pins once pinch ends (but keep any corner pins none)
+                for (const i of [...cloth.pinned]){
+                  if (!cornerPins.has(i)) cloth.pinned.delete(i);
+                }
+              }
+            }
+          }
+        }
+      }
+      // Satisfy constraints (distance)
+      for (let k=0;k<constraints.length;k++){
+        const [ia, ib, rest] = constraints[k];
+        const a = particles[ia], b = particles[ib];
+        const delta = b.pos.clone().sub(a.pos);
+        const d = delta.length() || 1e-6;
+        const diff = (d - rest) / d;
+        const invA = a.invMass, invB = b.invMass; const sum = invA + invB;
+        if (sum === 0) continue;
+        const corr = delta.multiplyScalar(0.5*diff);
+        if (!cloth.pinned.has(ia)) a.pos.addScaledVector(corr, 1);
+        if (!cloth.pinned.has(ib)) b.pos.addScaledVector(corr, -1);
+      }
+      // Write back to geometry
+      const pa = cloth.posAttr;
+      const v = new THREE.Vector3();
+      for (let i=0;i<pa.count;i++){
+        const p = cloth.particles[ cloth.vertToParticle[i] ].pos;
+        v.copy(p); // cloth built in XZ plane; geometry already rotated
+        pa.setXYZ(i, v.x, v.y, v.z);
+      }
+      pa.needsUpdate = true;
+      cloth.mesh.computeVertexNormals();
+    }
+
+    // Corner pins (lightly hold two corners at spawn, then release once dropped)
+    const cornerPins = new Set();
+
+    function resetClothAboveTable(){
+      buildCloth();
+      cornerPins.clear();
+      // Pin two corners briefly so it spawns tidy above the table
+      const segX = cloth.segX, segY = cloth.segY;
+      const idx = (x,y)=> y*(segX+1)+x;
+      const a = idx(0,0), b = idx(segX,0);
+      cloth.pinned.add(a); cloth.pinned.add(b);
+      cornerPins.add(a); cornerPins.add(b);
+      setTimeout(()=>{ for (const i of cornerPins) cloth.pinned.delete(i); cornerPins.clear(); }, 1200);
+    }
+
+    // --- Table plane detection ---
+    let session = null, referenceSpace = null, viewerSpace = null, hitTestSource = null;
+    let planeDetector = null, tablePlane = null; // { normal:Vector3, constant:Number }
+
+    async function selectTablePlane(xrFrame){
+      // Prefer plane-detection: choose largest near-horizontal plane below the cloth spawn height
+      if (session.requestReferenceSpace && session.requestHitTestSource && session.requestHitTestSourceForTransientInput){}
+      if ('planeDetection' in session && session.planeDetection){
+        planeDetector = await session.requestPlaneDetection();
+      }
+    }
+
+    function updatePlaneFromAPI(xrFrame){
+      if (!planeDetector) return false;
+      const planes = xrFrame.detectedPlanes || planeDetector.detectedPlanes; // browser differences
+      if (!planes || planes.size === 0) return false;
+      let best = null; let bestArea = 0;
+      for (const p of planes){
+        const pose = xrFrame.getPose(p.planeSpace || p, referenceSpace);
+        if (!pose) continue;
+        // Plane normal is +Y of its space by convention
+        const n = new THREE.Vector3(0,1,0).applyQuaternion(new THREE.Quaternion(
+          pose.transform.orientation.x,
+          pose.transform.orientation.y,
+          pose.transform.orientation.z,
+          pose.transform.orientation.w
+        ));
+        // check near-horizontal
+        if (Math.abs(n.y) < 0.7) continue;
+        // estimate area from polygon (if provided)
+        let area = 0;
+        const poly = p.polygon || p.polygonVertices || [];
+        for (let i=1;i+1<poly.length;i++){
+          const ax = poly[0].x, ay = poly[0].y;
+          const bx = poly[i].x, by = poly[i].y;
+          const cx = poly[i+1].x, cy = poly[i+1].y;
+          area += Math.abs((bx-ax)*(cy-ay) - (cx-ax)*(by-ay));
+        }
+        if (area > bestArea){ bestArea = area; best = { pose, n } }
+      }
+      if (best){
+        const p = new THREE.Vector3(best.pose.transform.position.x, best.pose.transform.position.y, best.pose.transform.position.z);
+        const n = best.n.normalize();
+        tablePlane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, p);
+        note.textContent = 'Table locked';
+        return true;
+      }
+      return false;
+    }
+
+    async function setupHitTest(){
+      viewerSpace = await session.requestReferenceSpace('viewer');
+      hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+    }
+
+    function updatePlaneFromHitTest(xrFrame){
+      if (tablePlane) return true;
+      if (!hitTestSource) return false;
+      const hits = xrFrame.getHitTestResults(hitTestSource);
+      if (hits.length){
+        const hit = hits[0];
+        const pose = hit.getPose(referenceSpace);
+        if (pose){
+          const p = new THREE.Vector3(pose.transform.position.x, pose.transform.position.y, pose.transform.position.z);
+          // Assume horizontal plane facing up
+          const n = new THREE.Vector3(0,1,0);
+          tablePlane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, p);
+          note.textContent = 'Table set (hit‑test)';
+          return true;
+        }
+      }
+      return false;
+    }
+
+    // --- Session start ---
+    startBtn.onclick = async () => {
+      if (!supported) return;
+      try{
+        session = await navigator.xr.requestSession('immersive-ar', {
+          requiredFeatures,
+          optionalFeatures,
+          // dom-overlay requires a root element; we just reuse body
+          domOverlay: { root: document.body },
+        });
+      } catch (e){
+        alert('Failed to start AR session: '+e.message);
+        return;
+      }
+
+      enterUI.style.display = 'none';
+      hud.hidden = false;
+
+      renderer.xr.setReferenceSpaceType('local');
+      renderer.xr.setSession(session);
+
+      referenceSpace = await session.requestReferenceSpace('local');
+
+      // Add visual hand models
+      for (let i=0;i<2;i++){
+        const hand = renderer.xr.getHand(i);
+        const model = handFactory.createHandModel(hand, 'boxes');
+        hand.add(model);
+        scene.add(hand); hands.push(hand);
+      }
+
+      await setupHitTest();
+      await selectTablePlane();
+
+      resetClothAboveTable();
+
+      session.addEventListener('select', () => { tablePlane = null; note.textContent = 'Tap a surface to set table…'; });
+
+      renderer.setAnimationLoop((t,frame)=>{
+        const dt = Math.min(1/30, renderer.xr.isPresenting ? (renderer.xr.getFrame()?.deltaTime||16)/1000 : 1/60);
+        if (frame){
+          if (!tablePlane){
+            if (!updatePlaneFromAPI(frame)) updatePlaneFromHitTest(frame);
+          }
+          simulateCloth(dt, frame, referenceSpace);
+        }
+        renderer.render(scene, camera);
+      });
+    };
+
+    reloadBtn.onclick = ()=>{ tablePlane = null; resetClothAboveTable(); note.textContent = 'Reset. Scanning for table…'; };
+
+    // Resize
+    addEventListener('resize', ()=>{
+      camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+  </script>
+</body>
+</html>
