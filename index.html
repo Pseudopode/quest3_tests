@@ -35,14 +35,17 @@
 
     // Feature checks
     const supported = navigator.xr && await navigator.xr.isSessionSupported?.('immersive-ar');
-    const requiredFeatures = ['hand-tracking','hit-test'];
-    const optionalFeatures = ['plane-detection','anchors','dom-overlay','layers'];
+    const requiredFeatures = ['hand-tracking'];
+    const optionalFeatures = ['hit-test','plane-detection','anchors','dom-overlay','layers'];
 
     const enterUI = document.getElementById('enter');
     const startBtn = document.getElementById('start');
     const hud = document.getElementById('hud');
     const note = document.getElementById('note');
     const reloadBtn = document.getElementById('reload');
+    const logDiv = document.getElementById('log');
+    const log = (...a)=>{ try{ logDiv.style.display='block'; logDiv.textContent += a.join(' ')+'
+'; }catch{} console.log(...a); };
 
     if (!supported) startBtn.textContent = 'WebXR AR not supported here';
 
@@ -387,5 +390,6 @@
     });
 
   </script>
+  <div id="log" style="position:fixed;top:8px;left:8px;right:8px;max-height:38vh;overflow:auto;font:12px/1.3 monospace;color:#e3f2fd;background:rgba(0,0,0,.5);padding:8px;border-radius:10px;display:none"></div>
 </body>
 </html>
