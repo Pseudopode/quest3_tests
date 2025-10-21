@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
 <meta http-equiv="Cache-Control" content="no-cache">
-<title>Quest 3 MR Cloth (single file)</title>
+<title>Quest 3 MR Cloth + In‑Scene UI + Gizmo (single file)</title>
 <style>
   :root { --ui-bg: rgba(15,15,20,0.7); --ui-fg: #fff; --ui-ac: #66d; }
   html, body { margin:0; padding:0; background:#000; height:100%; overflow:hidden; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, sans-serif; color:var(--ui-fg); }
@@ -50,7 +50,7 @@
 
 <div class="footer">
   <div class="panel" style="font-size:13px; line-height:1.2;">
-    <div><b>Instructions</b>: Look at your table until the reticle sticks. <b>Pinch</b> to place the plane &amp; spawn cloth. Pinch near cloth to grab; release to drop. Use <b>Reset</b> if needed.</div>
+    <div><b>In‑scene UI</b>: Press colored squares: <span style="color:#f66">Reset</span>, <span style="color:#6f6">Re‑arm Reticle</span>, <span style="color:#ffdb4d">Toggle Gizmo</span>. Gizmo: grab <b>X/Z/Y</b> arrows to move, <b>ring</b> to rotate.</div>
   </div>
 </div>
 
@@ -68,18 +68,15 @@ const V = {
   norm:(a)=>{ const L=V.len(a)||1; return [a[0]/L,a[1]/L,a[2]/L]; }
 };
 function mat4Identity(){ return [1,0,0,0,  0,1,0,0,  0,0,1,0,  0,0,0,1]; }
-function mat4Multiply(a,b){ // a*b
+function mat4Multiply(a,b){ // a*b (column-major)
   const o=new Float32Array(16);
   for(let c=0;c<4;c++) for(let r=0;r<4;r++){
     o[c*4+r]=a[0*4+r]*b[c*4+0]+a[1*4+r]*b[c*4+1]+a[2*4+r]*b[c*4+2]+a[3*4+r]*b[c*4+3];
   }
   return o;
 }
-function mat4FromPose(pose){ // XRRigidTransform.matrix is Float32Array already column-major
-  return pose ? new Float32Array(pose.matrix) : new Float32Array(mat4Identity());
-}
+function mat4FromPose(pose){ return pose ? new Float32Array(pose.matrix) : new Float32Array(mat4Identity()); }
 function mat4InverseRigid(m){ // inverse of rigid transform (R,t)
-  // [ R  t ]^-1 = [ R^T  -R^T t ]
   const r00=m[0], r01=m[1], r02=m[2];
   const r10=m[4], r11=m[5], r12=m[6];
   const r20=m[8], r21=m[9], r22=m[10];
@@ -94,15 +91,36 @@ function mat4InverseRigid(m){ // inverse of rigid transform (R,t)
   o[15]=1;
   return o;
 }
-function quatToBasisY(q){ // returns world-space "up" from quaternion (assumes unit) – rotate (0,1,0)
-  const [x,y,z,w]=q; // column-major not needed
-  // v' = q * (0,1,0,0) * conj(q)
+function transformPoint(m,p){
+  return [
+    m[0]*p[0]+m[4]*p[1]+m[8]*p[2]+m[12],
+    m[1]*p[0]+m[5]*p[1]+m[9]*p[2]+m[13],
+    m[2]*p[0]+m[6]*p[1]+m[10]*p[2]+m[14],
+  ];
+}
+function transformVector(m,v){ // ignore translation
+  return [
+    m[0]*v[0]+m[4]*v[1]+m[8]*v[2],
+    m[1]*v[0]+m[5]*v[1]+m[9]*v[2],
+    m[2]*v[0]+m[6]*v[1]+m[10]*v[2],
+  ];
+}
+function composeFromBasis(r,u,f,t){ // columns = r,u,f,t (column-major)
+  return new Float32Array([
+    r[0], r[1], r[2], 0,
+    u[0], u[1], u[2], 0,
+    f[0], f[1], f[2], 0,
+    t[0], t[1], t[2], 1
+  ]);
+}
+function quatToBasisY(q){ // rotate (0,1,0) by quaternion
+  const [x,y,z,w]=q;
   const vx = 2*(x*y + w*z);
   const vy = 1 - 2*(x*x + z*z);
   const vz = 2*(y*z - w*x);
   return [vx,vy,vz];
 }
-function quatFromMat(m){ // approximate, extract from rotation part
+function quatFromMat(m){ // approximate quaternion from rotation part
   const m00=m[0], m11=m[5], m22=m[10];
   const tr=m00+m11+m22;
   let x,y,z,w;
@@ -112,10 +130,15 @@ function quatFromMat(m){ // approximate, extract from rotation part
   else { const S=Math.sqrt(1.0+m22-m00-m11)*2; w=(m[1]-m[4])/S; x=(m[8]+m[2])/S; y=(m[9]+m[6])/S; z=0.25*S; }
   return [x,y,z,w];
 }
+function rodrigues(v, axis, angle){ // rotate vector v around axis
+  const a = V.norm(axis), s=Math.sin(angle), c=Math.cos(angle);
+  const dot = V.dot(a,v);
+  const cross = V.cross(a,v);
+  return V.add(V.add(V.mul(v,c), V.mul(cross,s)), V.mul(a, (1-c)*dot));
+}
 
 /* ----------------------------- GL boilerplate ---------------------------- */
 const canvas = document.getElementById('xr-canvas');
-/** @type {WebGLRenderingContext} */
 let gl;
 let session, refSpace, viewerSpace, baseLayer, hitTestSource;
 
@@ -139,63 +162,40 @@ const VS = `
 attribute vec3 aPos;
 attribute vec3 aNor;
 attribute vec2 aUV;
-
-uniform mat4 uProj;
-uniform mat4 uView;
-uniform mat4 uModel;
-
-varying vec3 vN;
-varying vec3 vW;
-varying vec2 vUV;
-
+uniform mat4 uProj, uView, uModel;
+varying vec3 vN; varying vec3 vW; varying vec2 vUV;
 void main(){
   vec4 wPos = uModel * vec4(aPos,1.0);
   vW = wPos.xyz;
-  // normal (model assumed rigid)
   vN = mat3(uModel) * aNor;
   vUV = aUV;
   gl_Position = uProj * uView * wPos;
 }`;
 const FS = `
 precision mediump float;
-varying vec3 vN;
-varying vec3 vW;
-varying vec2 vUV;
-
-uniform vec3 uEye;
-uniform vec3 uLightDir; // world-space dir
-uniform vec3 uBaseColor;
-uniform float uMetal;
-uniform float uRough;
-
+varying vec3 vN; varying vec3 vW; varying vec2 vUV;
+uniform vec3 uEye; uniform vec3 uLightDir; uniform vec3 uBaseColor; uniform float uMetal; uniform float uRough;
 void main(){
   vec3 N = normalize(vN);
   vec3 L = normalize(-uLightDir);
-  vec3 V = normalize(uEye - vW);
-  vec3 H = normalize(L+V);
-
+  vec3 Vv = normalize(uEye - vW);
+  vec3 H = normalize(L+Vv);
   float ndl = max(dot(N,L), 0.0);
   float ndh = max(dot(N,H), 0.0);
   float spec = pow(ndh, mix(24.0, 4.0, clamp(uRough,0.0,1.0)));
-
   vec3 base = uBaseColor;
   vec3 color = base * (0.15 + 0.85*ndl) + vec3(0.6) * spec * (1.0 - uRough);
   gl_FragColor = vec4(color, 1.0);
 }`;
-
-// simple color-only program (reticle & debug)
-const VS2 = `
-attribute vec3 aPos;
-uniform mat4 uProj, uView, uModel;
-void main(){ gl_Position = uProj * uView * uModel * vec4(aPos,1.0); }`;
+// color-only program (reticle, UI, gizmo)
+const VS2 = `attribute vec3 aPos; uniform mat4 uProj, uView, uModel; void main(){ gl_Position = uProj * uView * uModel * vec4(aPos,1.0); }`;
 const FS2 = `precision mediump float; uniform vec4 uColor; void main(){ gl_FragColor = uColor; }`;
 
 /* ------------------------------ Geometry -------------------------------- */
 let progMain, progLine;
 let bufPos, bufNor, bufUV, bufIdx; // cloth
-let bufReticle; // line loop
-let loc = {};
-let loc2 = {};
+let bufReticle, bufTemp; // line loop + dynamic triangles/lines
+let loc = {}, loc2 = {};
 
 function initPrograms(){
   const vs = compile(gl, VS, gl.VERTEX_SHADER);
@@ -227,33 +227,29 @@ function initPrograms(){
 }
 
 /* --------------------------- Cloth simulation --------------------------- */
-const CLOTH_W = 1.2, CLOTH_H = 1.2;   // meters size
-const NX = 32, NY = 32;               // grid resolution
+const CLOTH_W = 1.2, CLOTH_H = 1.2;
+const NX = 32, NY = 32;
 const NPTS = NX*NY;
 const DX = CLOTH_W/(NX-1), DY = CLOTH_H/(NY-1);
 const GRAV = [0,-9.8,0];
 const DAMP = 0.0015;
 const SUBSTEPS = 2;
 const ITER = 10;
-const PICK_RADIUS = 0.06; // m
+const PICK_RADIUS = 0.06;
 
-// arrays
 const pos = new Float32Array(NPTS*3);
 const prev= new Float32Array(NPTS*3);
 const nor = new Float32Array(NPTS*3);
 const invm= new Float32Array(NPTS);
 const uv  = new Float32Array(NPTS*2);
-let idx; // Uint16Array
+let idx;
 
-// constraints: [i,j,rest,stiff]
 const cons = [];
 function pIndex(ix,iy){ return iy*NX + ix; }
 function posOf(i){ return [pos[3*i],pos[3*i+1],pos[3*i+2]]; }
 function setPos(i, v){ pos[3*i]=v[0]; pos[3*i+1]=v[1]; pos[3*i+2]=v[2]; }
 
 function initClothAt(origin=[0,1.2,0], right=[1,0,0], up=[0,0,-1]){
-  // Build a flat sheet oriented by basis (right, up, normal = right x up)
-  // Default: hangs above plane, will drop with gravity
   cons.length = 0;
   for(let y=0;y<NY;y++){
     for(let x=0;x<NX;x++){
@@ -267,21 +263,18 @@ function initClothAt(origin=[0,1.2,0], right=[1,0,0], up=[0,0,-1]){
       uv[2*i]=u0; uv[2*i+1]=v0;
     }
   }
-  // structural constraints
   function addC(i,j,s){ cons.push(i,j,s,1.0); }
   for(let y=0;y<NY;y++){
     for(let x=0;x<NX;x++){
       const i = pIndex(x,y);
       if(x+1<NX) addC(i, pIndex(x+1,y), DX);
-      if(y+1<NY) addC(i, pIndex(x,y+1), DY);
-      if(x+1<NX && y+1<NY) addC(i, pIndex(x+1,y+1), Math.hypot(DX,DY)); // shear
+      if(y+1<NY) addC(i, pIndex(x, y+1), DY);
+      if(x+1<NX && y+1<NY) addC(i, pIndex(x+1,y+1), Math.hypot(DX,DY));
       if(x>0 && y+1<NY) addC(i, pIndex(x-1,y+1), Math.hypot(DX,DY));
-      // bend (2 steps)
       if(x+2<NX) addC(i, pIndex(x+2,y), 2*DX);
       if(y+2<NY) addC(i, pIndex(x,y+2), 2*DY);
     }
   }
-  // indices (triangles)
   const tris = [];
   for(let y=0;y<NY-1;y++){
     for(let x=0;x<NX-1;x++){
@@ -290,10 +283,8 @@ function initClothAt(origin=[0,1.2,0], right=[1,0,0], up=[0,0,-1]){
     }
   }
   idx = (NPTS<65536) ? new Uint16Array(tris) : new Uint32Array(tris);
-  // Initial normals
   recomputeNormals();
 }
-
 function recomputeNormals(){
   for(let i=0;i<3*NPTS;i++) nor[i]=0;
   for(let t=0;t<idx.length; t+=3){
@@ -311,26 +302,21 @@ function recomputeNormals(){
     nor[3*i]=nn[0]; nor[3*i+1]=nn[1]; nor[3*i+2]=nn[2];
   }
 }
-
 function integrate(dt){
-  // Semi-implicit Verlet
   const damping = Math.exp(-DAMP*dt);
   for(let i=0;i<NPTS;i++){
     const ix=3*i;
     const x=[pos[ix],pos[ix+1],pos[ix+2]];
     const prevx=[prev[ix],prev[ix+1],prev[ix+2]];
     const vel = V.mul(V.sub(x,prevx), damping);
-    // gravity
     const acc = V.mul(GRAV, dt*dt);
     const nx = V.add(V.add(x, vel), acc);
     prev[ix]=x[0]; prev[ix+1]=x[1]; prev[ix+2]=x[2];
     pos[ix]=nx[0]; pos[ix+1]=nx[1]; pos[ix+2]=nx[2];
   }
 }
-
 function satisfyConstraints(){
   for(let it=0; it<ITER; it++){
-    // distance constraints
     for(let k=0;k<cons.length;k+=4){
       const i=cons[k], j=cons[k+1], rest=cons[k+2], stiff=cons[k+3];
       const ix=3*i, jx=3*j;
@@ -340,15 +326,11 @@ function satisfyConstraints(){
       const L=V.len(d)||1e-6;
       const invMassSum = invm[i]+invm[j] || 1e-6;
       const corr = V.mul(d, (1.0 - rest/L) * stiff);
-      // distribute according to masses
       if(invm[i]>0){ pos[ix]-=corr[0]*(invm[i]/invMassSum); pos[ix+1]-=corr[1]*(invm[i]/invMassSum); pos[ix+2]-=corr[2]*(invm[i]/invMassSum); }
       if(invm[j]>0){ pos[jx]+=corr[0]*(invm[j]/invMassSum); pos[jx+1]+=corr[1]*(invm[j]/invMassSum); pos[jx+2]+=corr[2]*(invm[j]/invMassSum); }
     }
-    // plane collision
     collideWithPlane();
-    // hand spheres collision
     handCollision();
-    // grabbed particles get pinned last for stability
     applyGrabs();
   }
 }
@@ -356,7 +338,7 @@ function satisfyConstraints(){
 /* ------------------------ Plane & hit-test reticle ----------------------- */
 let planeSet = false;
 let planePoint = [0, 0.75, 0];
-let planeNormal = [0, 1, 0]; // upward
+let planeNormal = [0, 1, 0];
 let reticleActive = false;
 let reticleModel = new Float32Array(mat4Identity());
 
@@ -364,14 +346,13 @@ function collideWithPlane(){
   const N = planeNormal;
   const P0 = planePoint;
   for(let i=0;i<NPTS;i++){
-    if(invm[i]===0) continue; // grabbed: skip here (will project later)
+    if(invm[i]===0) continue;
     const ix=3*i;
     const p=[pos[ix],pos[ix+1],pos[ix+2]];
     const d = V.dot(V.sub(p,P0), N);
     if(d<0){
       const corr = V.mul(N, -d);
       pos[ix]+=corr[0]; pos[ix+1]+=corr[1]; pos[ix+2]+=corr[2];
-      // basic friction: drag along plane normal damping previous
       prev[ix]+=corr[0]*0.6; prev[ix+1]+=corr[1]*0.6; prev[ix+2]+=corr[2]*0.6;
     }
   }
@@ -380,17 +361,15 @@ function collideWithPlane(){
 /* ------------------------------ Hand input ------------------------------ */
 const hands = { left: null, right: null };
 const handState = {
-  left:  { pinch:false, wasPinch:false, pinchPos:[0,0,0], grabId:-1 },
-  right: { pinch:false, wasPinch:false, pinchPos:[0,0,0], grabId:-1 }
+  left:  { pinch:false, wasPinch:false, pinchPos:[0,0,0], grabId:-1, consumed:false },
+  right: { pinch:false, wasPinch:false, pinchPos:[0,0,0], grabId:-1, consumed:false }
 };
-const PALM_RAD = 0.07; // meters
+const PALM_RAD = 0.07;
 
 function handCollision(){
-  // Push cloth out of palm spheres (keeps sheet from tunneling into hands)
   for(const side of ['left','right']){
     const h = hands[side]; if(!h) continue;
-    const palmp = h.palm;
-    if(!palmp) continue;
+    const palmp = h.palm; if(!palmp) continue;
     const c = [palmp.x, palmp.y, palmp.z];
     const r = PALM_RAD;
     for(let i=0;i<NPTS;i++){
@@ -406,14 +385,12 @@ function handCollision(){
     }
   }
 }
-
 function applyGrabs(){
   for(const side of ['left','right']){
     const st = handState[side];
     if(st.grabId>=0){
       const g = st.grabId;
       const ix = 3*g;
-      // pin particle to pinch position (acts as kinematic target)
       pos[ix] = st.pinchPos[0];
       pos[ix+1] = st.pinchPos[1];
       pos[ix+2] = st.pinchPos[2];
@@ -421,7 +398,6 @@ function applyGrabs(){
     }
   }
 }
-
 function nearestParticle(to, maxR = PICK_RADIUS){
   let best=-1, bestD=maxR;
   for(let i=0;i<NPTS;i++){
@@ -432,14 +408,11 @@ function nearestParticle(to, maxR = PICK_RADIUS){
   }
   return best;
 }
-
 function updateHands(frame){
-  // Build a lightweight per-hand snapshot of key joints
   for(const input of session.inputSources){
     if(!input.hand) continue;
-    const handedness = input.handedness; // 'left'|'right'
+    const handedness = input.handedness;
     const hand = input.hand;
-
     function jp(name){
       const space = hand.get(name);
       if(!space) return null;
@@ -448,40 +421,53 @@ function updateHands(frame){
     }
     const thumb = jp('thumb-tip');
     const index = jp('index-finger-tip');
-    const palmP = jp('wrist') || jp('index-finger-metacarpal'); // approx center
-
-    // Save
+    const palmP = jp('wrist') || jp('index-finger-metacarpal');
     hands[handedness] = { thumb, index, palm: palmP };
 
-    // Pinch detection
     const st = handState[handedness];
     st.wasPinch = st.pinch;
     if(thumb && index){
       const d = Math.hypot(thumb.x-index.x, thumb.y-index.y, thumb.z-index.z);
-      st.pinch = d < 0.03; // ~3 cm
+      st.pinch = d < 0.03;
       if(st.pinch){
         st.pinchPos = [(thumb.x+index.x)/2, (thumb.y+index.y)/2, (thumb.z+index.z)/2];
       }
     } else {
       st.pinch = false;
     }
+    st.consumed = false;
 
-    // Grab begin
+    // ----- Pinch begin routing: UI panel -> Reticle placement -> Gizmo -> Cloth -----
     if(st.pinch && !st.wasPinch){
-      // If we haven't set the plane yet, a pinch over a valid reticle places it.
+      if(tryUIPress(st.pinchPos)){ st.consumed=true; continue; }
+
       if(!planeSet && reticleActive){
         placePlaneAndSpawnFromReticle();
-      } else {
-        // Try to pick a particle near pinch
-        const id = nearestParticle(st.pinchPos, PICK_RADIUS);
-        if(id>=0){
-          st.grabId = id;
-          invm[id] = 0.0; // pin while grabbed
-        }
+        st.consumed=true; continue;
+      }
+
+      if(gizmo.visible && tryGizmoGrabBegin(st)){ st.consumed=true; continue; }
+
+      // cloth pinch-grab (only if not consumed and gizmo not active)
+      const id = nearestParticle(st.pinchPos, PICK_RADIUS);
+      if(id>=0 && !gizmo.activeHandle){
+        st.grabId = id;
+        invm[id] = 0.0;
       }
     }
-    // Grab end
+
+    // ----- Pinch move (gizmo drag) -----
+    if(st.pinch && st.wasPinch && gizmo.activeHandle && gizmo.activeHand===handedness){
+      handleGizmoDrag(st);
+      st.consumed = true;
+    }
+
+    // ----- Pinch end -----
     if(!st.pinch && st.wasPinch){
+      if(gizmo.activeHandle && gizmo.activeHand===handedness){
+        gizmo.activeHandle = null;
+        gizmo.activeHand = null;
+      }
       if(st.grabId>=0){
         invm[st.grabId] = 1.0;
         st.grabId = -1;
@@ -501,6 +487,9 @@ function buildReticleGeometry(){
   bufReticle = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, bufReticle);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(ring), gl.STATIC_DRAW);
+
+  // shared dynamic buffer for triangles/lines
+  bufTemp = gl.createBuffer();
 }
 
 /* --------------------------- Cloth GL buffers --------------------------- */
@@ -518,7 +507,6 @@ function updateClothBuffers(){
 /* ------------------------------ Rendering ------------------------------- */
 function drawCloth(view, viewMat, projMat){
   gl.useProgram(progMain);
-  // attributes
   gl.bindBuffer(gl.ARRAY_BUFFER, bufPos);
   gl.enableVertexAttribArray(loc.aPos);
   gl.vertexAttribPointer(loc.aPos, 3, gl.FLOAT, false, 0, 0);
@@ -533,7 +521,6 @@ function drawCloth(view, viewMat, projMat){
 
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bufIdx);
 
-  // uniforms
   gl.uniformMatrix4fv(loc.uProj, false, projMat);
   gl.uniformMatrix4fv(loc.uView, false, viewMat);
   gl.uniformMatrix4fv(loc.uModel, false, mat4Identity());
@@ -548,7 +535,6 @@ function drawCloth(view, viewMat, projMat){
   gl.enable(gl.DEPTH_TEST);
   gl.drawElements(gl.TRIANGLES, idx.length, gl.UNSIGNED_SHORT, 0);
 }
-
 function drawReticle(viewMat, projMat, color=[0.2,1,0.6,1]){
   if(!reticleActive) return;
   gl.useProgram(progLine);
@@ -561,6 +547,276 @@ function drawReticle(viewMat, projMat, color=[0.2,1,0.6,1]){
   gl.uniform4f(loc2.uColor, color[0],color[1],color[2],color[3]);
   gl.disable(gl.DEPTH_TEST);
   gl.drawArrays(gl.LINE_LOOP, 0, 48);
+}
+
+/* --------------------------- In‑scene UI panel --------------------------- */
+const ui = {
+  enabled: true,
+  model: new Float32Array(mat4Identity()),
+  invModel: new Float32Array(mat4Identity()),
+  // Button layout (local panel space, z=0 plane)
+  buttons: [
+    { name:'Reset', color:[0.96,0.4,0.4,1], center:[-0.14,0.00,0], half:[0.11,0.06], action:()=>resetAll() },
+    { name:'Rearm', color:[0.40,0.96,0.40,1], center:[0.00,0.00,0],  half:[0.11,0.06], action:()=>rearmReticle() },
+    { name:'Gizmo', color:[1.00,0.86,0.30,1], center:[+0.14,0.00,0], half:[0.11,0.06], action:()=>toggleGizmo() },
+  ],
+  hoverIndex: -1,
+};
+function updateUIPanel(view){ // follow-head, ~0.55m forward, slight down
+  const m = new Float32Array(view.transform.matrix);
+  const headPos = [m[12],m[13],m[14]];
+  const right = V.norm([m[0],m[1],m[2]]);
+  const up    = V.norm([m[4],m[5],m[6]]);
+  const fwd   = V.norm([-m[8],-m[9],-m[10]]); // camera -Z
+  const pos = V.add(headPos, V.add(V.mul(fwd, 0.55), V.mul(up, -0.05)));
+  ui.model = composeFromBasis(right, up, fwd, pos);
+  ui.invModel = mat4InverseRigid(ui.model);
+}
+function drawUIPanel(viewMat, projMat){
+  if(!ui.enabled) return;
+  gl.useProgram(progLine);
+  gl.uniformMatrix4fv(loc2.uProj, false, projMat);
+  gl.uniformMatrix4fv(loc2.uView, false, viewMat);
+
+  // draw panel backplate (rounded-ish by just a bigger dim)
+  function drawRect(center, half, col, z=0){
+    const [cx,cy]=center, [hx,hy]=half;
+    const verts = new Float32Array([
+      cx-hx, cy-hy, z,  cx+hx, cy-hy, z,  cx+hx, cy+hy, z,
+      cx-hx, cy-hy, z,  cx+hx, cy+hy, z,  cx-hx, cy+hy, z
+    ]);
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufTemp);
+    gl.bufferData(gl.ARRAY_BUFFER, verts, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(loc2.aPos);
+    gl.vertexAttribPointer(loc2.aPos, 3, gl.FLOAT, false, 0, 0);
+    gl.uniformMatrix4fv(loc2.uModel, false, ui.model);
+    gl.uniform4f(loc2.uColor, col[0],col[1],col[2],col[3]);
+    gl.enable(gl.DEPTH_TEST);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
+  // subtle backplate
+  drawRect([0,0,0], [0.39,0.09], [0.08,0.10,0.14,0.65], 0.0);
+
+  // buttons
+  for(let i=0;i<ui.buttons.length;i++){
+    const b=ui.buttons[i];
+    const col = (i===ui.hoverIndex) ? [b.color[0],b.color[1],b.color[2],1] : b.color;
+    drawRect(b.center,b.half,col,0.001);
+
+    // simple icon per button (lines)
+    const lines = [];
+    if(b.name==='Reset'){ // circular arrow-ish
+      const R=0.028, N=24;
+      for(let k=0;k<N;k++){
+        const t0=(k/N)*1.6*Math.PI-0.8, t1=((k+1)/N)*1.6*Math.PI-0.8;
+        lines.push(b.center[0]+R*Math.cos(t0), b.center[1]+R*Math.sin(t0), 0.002);
+        lines.push(b.center[0]+R*Math.cos(t1), b.center[1]+R*Math.sin(t1), 0.002);
+      }
+      // arrow head
+      lines.push(b.center[0]+R*0.95, b.center[1]-0.005, 0.002, b.center[0]+R*1.08, b.center[1]+0.012, 0.002);
+      lines.push(b.center[0]+R*0.95, b.center[1]-0.005, 0.002, b.center[0]+R*1.10, b.center[1]-0.020, 0.002);
+    } else if(b.name==='Rearm'){ // crosshair
+      const cx=b.center[0], cy=b.center[1];
+      lines.push(cx-0.05,cy,0.002, cx+0.05,cy,0.002);
+      lines.push(cx,cy-0.05,0.002, cx,cy+0.05,0.002);
+      const N=24, R=0.035;
+      for(let k=0;k<N;k++){
+        const t0=(k/N)*2*Math.PI, t1=((k+1)/N)*2*Math.PI;
+        lines.push(cx+R*Math.cos(t0), cy+R*Math.sin(t0), 0.002);
+        lines.push(cx+R*Math.cos(t1), cy+R*Math.sin(t1), 0.002);
+      }
+    } else { // Gizmo icon (axes)
+      const cx=b.center[0], cy=b.center[1];
+      lines.push(cx,cy,0.002, cx+0.06,cy,0.002);
+      lines.push(cx,cy,0.002, cx,cy+0.06,0.002);
+      lines.push(cx,cy,0.002, cx-0.04,cy-0.04,0.002);
+    }
+    if(lines.length){
+      gl.bindBuffer(gl.ARRAY_BUFFER, bufTemp);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(lines), gl.DYNAMIC_DRAW);
+      gl.vertexAttribPointer(loc2.aPos, 3, gl.FLOAT, false, 0, 0);
+      gl.uniformMatrix4fv(loc2.uModel, false, ui.model);
+      gl.uniform4f(loc2.uColor, 0.95,0.95,0.98,1);
+      gl.drawArrays(gl.LINES, 0, lines.length/3);
+    }
+  }
+}
+// test for press
+function tryUIPress(worldPinch){
+  if(!ui.enabled) return false;
+  const lp = transformPoint(ui.invModel, worldPinch); // panel local
+  if(Math.abs(lp[2])>0.06) return false; // too far from plane
+  for(let i=0;i<ui.buttons.length;i++){
+    const b=ui.buttons[i];
+    if(Math.abs(lp[0]-b.center[0])<=b.half[0] && Math.abs(lp[1]-b.center[1])<=b.half[1]){
+      b.action();
+      return true;
+    }
+  }
+  return false;
+}
+// hover effect (use nearest hand, if any)
+function updateUIHover(){
+  ui.hoverIndex = -1;
+  for(const side of ['left','right']){
+    const st = handState[side];
+    if(!st.pinch) continue; // only while pinching (keeps it lightweight)
+    const lp = transformPoint(ui.invModel, st.pinchPos);
+    if(Math.abs(lp[2])>0.06) continue;
+    for(let i=0;i<ui.buttons.length;i++){
+      const b=ui.buttons[i];
+      if(Math.abs(lp[0]-b.center[0])<=b.half[0] && Math.abs(lp[1]-b.center[1])<=b.half[1]){
+        ui.hoverIndex = i; return;
+      }
+    }
+  }
+}
+
+/* ---------------------------- Transform gizmo ---------------------------- */
+const gizmo = {
+  visible:false,
+  origin:[0,1,0],
+  axisU:[1,0,0], axisV:[0,0,1], axisN:[0,1,0], // tangent axes, normal
+  len:0.22, ringR:0.16,
+  activeHandle:null, // 'TX','TY','TZ','RY'
+  activeHand:null,
+  ref:{} // per-drag refs (s0, angle0, etc.)
+};
+function computeClothCenter(){
+  let cx=0,cy=0,cz=0;
+  for(let i=0;i<NPTS;i++){ cx+=pos[3*i]; cy+=pos[3*i+1]; cz+=pos[3*i+2]; }
+  return [cx/NPTS, cy/NPTS, cz/NPTS];
+}
+function refreshGizmoBasis(){
+  gizmo.origin = computeClothCenter();
+  gizmo.axisN = V.norm(planeNormal);
+  const worldUp = [0,1,0];
+  let u = V.cross(gizmo.axisN, worldUp);
+  if(V.len(u)<1e-3) u = [1,0,0]; // fallback if parallel
+  gizmo.axisU = V.norm(u);
+  gizmo.axisV = V.norm(V.cross(gizmo.axisN, gizmo.axisU));
+}
+function toggleGizmo(){
+  gizmo.visible = !gizmo.visible;
+  if(gizmo.visible){
+    // release any cloth grabs
+    for(const s of ['left','right']){
+      const st=handState[s];
+      if(st.grabId>=0){ invm[st.grabId]=1.0; st.grabId=-1; }
+    }
+    refreshGizmoBasis();
+    setMsg('Gizmo ON: grab X/Z/Y to move, ring to rotate.');
+  } else {
+    gizmo.activeHandle=null; gizmo.activeHand=null;
+    setMsg('Gizmo OFF.');
+  }
+}
+function drawGizmo(viewMat, projMat){
+  if(!gizmo.visible) return;
+  gl.useProgram(progLine);
+  gl.uniformMatrix4fv(loc2.uProj, false, projMat);
+  gl.uniformMatrix4fv(loc2.uView, false, viewMat);
+
+  function drawLines(points, col){
+    gl.bindBuffer(gl.ARRAY_BUFFER, bufTemp);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(points), gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(loc2.aPos);
+    gl.vertexAttribPointer(loc2.aPos, 3, gl.FLOAT, false, 0, 0);
+    const M = composeFromBasis([1,0,0],[0,1,0],[0,0,1], [0,0,0]);
+    gl.uniformMatrix4fv(loc2.uModel, false, M);
+    gl.uniform4f(loc2.uColor, col[0],col[1],col[2],col[3]);
+    gl.enable(gl.DEPTH_TEST);
+    gl.drawArrays(gl.LINES, 0, points.length/3);
+  }
+  const o = gizmo.origin, L=gizmo.len, U=gizmo.axisU, Vt=gizmo.axisV, N=gizmo.axisN;
+  const xEnd = V.add(o, V.mul(U,L));
+  const zEnd = V.add(o, V.mul(Vt,L));
+  const yEnd = V.add(o, V.mul(N,L*0.8));
+  // axes
+  drawLines([ o[0],o[1],o[2], xEnd[0],xEnd[1],xEnd[2] ], gizmo.activeHandle==='TX'?[1,0.5,0.5,1]:[1,0.2,0.2,1]); // X (red-ish)
+  drawLines([ o[0],o[1],o[2], zEnd[0],zEnd[1],zEnd[2] ], gizmo.activeHandle==='TZ'?[0.5,0.5,1,1]:[0.2,0.2,1,1]); // Z (blue-ish)
+  drawLines([ o[0],o[1],o[2], yEnd[0],yEnd[1],yEnd[2] ], gizmo.activeHandle==='TY'?[0.5,1,0.5,1]:[0.2,1,0.2,1]); // Y (green-ish)
+  // ring around N in U/V plane
+  const R=gizmo.ringR, steps=48; const ringPts=[];
+  for(let i=0;i<steps;i++){
+    const t0=(i/steps)*2*Math.PI, t1=((i+1)/steps)*2*Math.PI;
+    const p0 = V.add( o, V.add( V.mul(U,R*Math.cos(t0)), V.mul(Vt,R*Math.sin(t0)) ) );
+    const p1 = V.add( o, V.add( V.mul(U,R*Math.cos(t1)), V.mul(Vt,R*Math.sin(t1)) ) );
+    ringPts.push(p0[0],p0[1],p0[2], p1[0],p1[1],p1[2]);
+  }
+  const ringCol = gizmo.activeHandle==='RY'?[1,1,0.5,1]:[1,1,0.2,1];
+  drawLines(ringPts, ringCol);
+}
+function distPointToSegment(p, a, b){
+  const ab = V.sub(b,a), ap = V.sub(p,a);
+  const t = Math.max(0, Math.min(1, V.dot(ap,ab)/(V.dot(ab,ab)||1e-6)));
+  const q = V.add(a, V.mul(ab,t));
+  return { d: V.len(V.sub(p,q)), t, q };
+}
+function tryGizmoGrabBegin(st){
+  const p = st.pinchPos, o=gizmo.origin, U=gizmo.axisU, Vt=gizmo.axisV, N=gizmo.axisN;
+  const L=gizmo.len, R=gizmo.ringR;
+  // test axes first
+  const xEnd = V.add(o, V.mul(U,L));
+  const zEnd = V.add(o, V.mul(Vt,L));
+  const yEnd = V.add(o, V.mul(N,L*0.8));
+  const thr = 0.03;
+  const dx = distPointToSegment(p, o, xEnd);
+  if(dx.d<thr){ gizmo.activeHandle='TX'; gizmo.activeHand=st===handState.left?'left':'right'; gizmo.ref.s = V.dot(V.sub(p,o),U); return true; }
+  const dz = distPointToSegment(p, o, zEnd);
+  if(dz.d<thr){ gizmo.activeHandle='TZ'; gizmo.activeHand=st===handState.left?'left':'right'; gizmo.ref.s = V.dot(V.sub(p,o),Vt); return true; }
+  const dy = distPointToSegment(p, o, yEnd);
+  if(dy.d<thr){ gizmo.activeHandle='TY'; gizmo.activeHand=st===handState.left?'left':'right'; gizmo.ref.s = V.dot(V.sub(p,o),N); return true; }
+  // test ring (project to plane)
+  const w = V.sub(p,o);
+  const radial = Math.hypot( V.dot(w,U), V.dot(w,Vt) );
+  const height = Math.abs(V.dot(w,N));
+  if(Math.abs(radial - R) < 0.03 && height < 0.04){
+    gizmo.activeHandle='RY'; gizmo.activeHand=st===handState.left?'left':'right';
+    gizmo.ref.angle = Math.atan2( V.dot(w,Vt), V.dot(w,U) );
+    return true;
+  }
+  return false;
+}
+function handleGizmoDrag(st){
+  const p = st.pinchPos, o=gizmo.origin, U=gizmo.axisU, Vt=gizmo.axisV, N=gizmo.axisN;
+  if(gizmo.activeHandle==='TX'){
+    const s = V.dot(V.sub(p,o),U); const ds = s - gizmo.ref.s; gizmo.ref.s = s;
+    translateCloth(V.mul(U, ds)); gizmo.origin = V.add(gizmo.origin, V.mul(U,ds));
+  } else if(gizmo.activeHandle==='TZ'){
+    const s = V.dot(V.sub(p,o),Vt); const ds = s - gizmo.ref.s; gizmo.ref.s = s;
+    translateCloth(V.mul(Vt, ds)); gizmo.origin = V.add(gizmo.origin, V.mul(Vt,ds));
+  } else if(gizmo.activeHandle==='TY'){
+    const s = V.dot(V.sub(p,o),N); const ds = s - gizmo.ref.s; gizmo.ref.s = s;
+    translateCloth(V.mul(N, ds)); gizmo.origin = V.add(gizmo.origin, V.mul(N,ds));
+  } else if(gizmo.activeHandle==='RY'){
+    const w = V.sub(p,o);
+    const ang = Math.atan2( V.dot(w,Vt), V.dot(w,U) );
+    let da = ang - gizmo.ref.angle;
+    // unwrap small discontinuities
+    if(da> Math.PI) da -= 2*Math.PI;
+    if(da<-Math.PI) da += 2*Math.PI;
+    rotateClothAround(o, N, da);
+    gizmo.ref.angle = ang;
+  }
+}
+function translateCloth(delta){
+  for(let i=0;i<NPTS;i++){
+    const ix=3*i;
+    pos[ix]+=delta[0]; pos[ix+1]+=delta[1]; pos[ix+2]+=delta[2];
+    prev[ix]+=delta[0]; prev[ix+1]+=delta[1]; prev[ix+2]+=delta[2];
+  }
+}
+function rotateClothAround(origin, axis, angle){
+  for(let i=0;i<NPTS;i++){
+    const ix=3*i;
+    const p = [pos[ix]-origin[0], pos[ix+1]-origin[1], pos[ix+2]-origin[2]];
+    const pr = rodrigues(p, axis, angle);
+    pos[ix]=origin[0]+pr[0]; pos[ix+1]=origin[1]+pr[1]; pos[ix+2]=origin[2]+pr[2];
+    const q = [prev[ix]-origin[0], prev[ix+1]-origin[1], prev[ix+2]-origin[2]];
+    const qr = rodrigues(q, axis, angle);
+    prev[ix]=origin[0]+qr[0]; prev[ix+1]=origin[1]+qr[1]; prev[ix+2]=origin[2]+qr[2];
+  }
 }
 
 /* ------------------------------ AR session ------------------------------ */
@@ -593,9 +849,7 @@ async function enterAR(){
   session.addEventListener('end', ()=>{ setMsg('Session ended.'); setDot(false); });
   session.addEventListener('inputsourceschange', ()=>{ /* keep default */ });
 
-  // Prepare initial cloth (spawns when plane is placed)
   initClothAt([0,1.2, -0.5]);
-
   initClothBuffers();
 
   setMsg('Look at your table until the reticle locks; pinch to place.');
@@ -603,36 +857,48 @@ async function enterAR(){
 
   session.requestAnimationFrame(onXRFrame);
 }
-
 function placePlaneAndSpawnFromReticle(){
-  // plane from reticle pose
   const q = quatFromMat(reticleModel);
-  const n = V.norm(quatToBasisY(q)); // approximate surface normal
+  const n = V.norm(quatToBasisY(q));
   planePoint = [reticleModel[12], reticleModel[13], reticleModel[14]];
-  planeNormal = (n[1] < 0 ? V.mul(n,-1) : n); // ensure roughly upward
+  planeNormal = (n[1] < 0 ? V.mul(n,-1) : n);
   planeSet = true;
-  // spawn cloth slightly above plane center
-  const right = [1,0,0], up = [0,0,-1]; // sheet local axes (arbitrary)
+  const right = [1,0,0], up = [0,0,-1];
   const spawn = V.add(planePoint, V.mul(planeNormal, 0.35));
   initClothAt(spawn, right, up);
   initClothBuffers();
-  setMsg('Plane placed. Pinch near the cloth to grab; release to drop.');
+  refreshGizmoBasis();
+  setMsg('Plane placed. Use the 3D panel or gizmo; pinch near the cloth to grab.');
 }
-
 function resetAll(){
   planeSet = false;
   reticleActive = false;
-  // light reset of cloth (it will drop when plane is set)
   initClothAt([0,1.2,-0.5]);
   initClothBuffers();
+  gizmo.visible=false; gizmo.activeHandle=null; gizmo.activeHand=null;
   setMsg('Reset. Look at the table and pinch to place the plane.');
-  // release grabs
   for(const s of ['left','right']){
     const st=handState[s];
     if(st.grabId>=0){ invm[st.grabId]=1.0; st.grabId=-1; }
   }
 }
+function rearmReticle(){
+  planeSet=false;
+  reticleActive=false; // will turn on as soon as a hit test returns
+  setMsg('Reticle re-armed. Look at your table and pinch to place plane.');
+}
 
+/* ------------------------------- UI wiring ------------------------------ */
+document.getElementById('enter').addEventListener('click', ()=>{
+  enterAR().catch(err=>{
+    console.error(err);
+    setMsg('Failed to start AR: ' + err.message);
+    setDot(false);
+  });
+});
+document.getElementById('reset').addEventListener('click', resetAll);
+
+/* ------------------------------ Main frame ------------------------------ */
 let lastTime = 0;
 function onXRFrame(t, frame){
   const dt = lastTime ? Math.min((t - lastTime)/1000, 1/30) : 1/90;
@@ -654,7 +920,10 @@ function onXRFrame(t, frame){
     }
   }
 
-  // Hand updates
+  // Update UI panel anchor (use first view)
+  updateUIPanel(pose.views[0]);
+
+  // Hand tracking & interactions
   updateHands(frame);
 
   // Step simulation
@@ -666,7 +935,10 @@ function onXRFrame(t, frame){
   recomputeNormals();
   updateClothBuffers();
 
-  // Render per-eye
+  // Hover effect (optional)
+  updateUIHover();
+
+  // Render
   gl.bindFramebuffer(gl.FRAMEBUFFER, baseLayer.framebuffer);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
@@ -677,25 +949,21 @@ function onXRFrame(t, frame){
     const proj = view.projectionMatrix;
     const viewMat = mat4InverseRigid(view.transform.matrix);
 
-    // Reticle (before cloth so it overlays cleanly; depth test off there)
+    // Reticle
     drawReticle(viewMat, proj);
 
     // Cloth
     drawCloth(view, viewMat, proj);
+
+    // Gizmo (on top of scene)
+    drawGizmo(viewMat, proj);
+
+    // In-scene UI
+    drawUIPanel(viewMat, proj);
   }
 
   session.requestAnimationFrame(onXRFrame);
 }
-
-/* ------------------------------- UI wiring ------------------------------ */
-document.getElementById('enter').addEventListener('click', ()=>{
-  enterAR().catch(err=>{
-    console.error(err);
-    setMsg('Failed to start AR: ' + err.message);
-    setDot(false);
-  });
-});
-document.getElementById('reset').addEventListener('click', resetAll);
 
 setMsg('Ready. Tap "Enter Mixed Reality" on Quest 3.');
 setDot(false);
