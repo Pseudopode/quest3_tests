@@ -24,6 +24,11 @@
       <small style="color:#9aa6b2">Tip: Give the app motion permission in the Quest Browser if prompted.</small>
     </div>
   </div>
+  <div style="position:fixed;top:58px;left:8px;right:8px;display:flex;gap:8px;justify-content:center;z-index:3">
+    <button id="startNonAR" style="font-size:14px;padding:8px 10px;border:0;border-radius:10px;background:#607d8b;color:#fff">Run Non‑AR demo</button>
+    <button id="runDiag" style="font-size:14px;padding:8px 10px;border:0;border-radius:10px;background:#8bc34a;color:#000">Run Diagnostics</button>
+    <button id="copyLog" style="font-size:14px;padding:8px 10px;border:0;border-radius:10px;background:#9c27b0;color:#fff">Copy Log</button>
+  </div>
   <div id="hud" hidden>
     <div id="note">Scanning for a horizontal table…</div>
     <button id="reload" title="Reset cloth">Reset cloth</button>
@@ -34,7 +39,9 @@
     import { XRHandModelFactory } from 'https://unpkg.com/three@0.161.0/examples/jsm/webxr/XRHandModelFactory.js';
 
     // Feature checks
-    const supported = navigator.xr && await navigator.xr.isSessionSupported?.('immersive-ar');
+    const arSupported = !!(navigator.xr) && await navigator.xr.isSessionSupported?.('immersive-ar');
+    const vrSupported = !!(navigator.xr) && await navigator.xr.isSessionSupported?.('immersive-vr');
+    const supported = arSupported;
     const requiredFeatures = ['hand-tracking'];
     const optionalFeatures = ['hit-test','plane-detection','anchors','dom-overlay','layers'];
 
@@ -44,6 +51,9 @@
     const note = document.getElementById('note');
     const reloadBtn = document.getElementById('reload');
     const logDiv = document.getElementById('log');
+    const startNonAR = document.getElementById('startNonAR');
+    const runDiag = document.getElementById('runDiag');
+    const copyLog = document.getElementById('copyLog');
     const log = (...a)=>{ try{ logDiv.style.display='block'; logDiv.textContent += a.join(' ')+'
 '; }catch{} console.log(...a); };
 
@@ -380,6 +390,47 @@
         renderer.render(scene, camera);
       });
     };
+
+    // Non‑AR fallback: show the cloth in a normal 3D scene (no permissions needed)
+    let nonARActive = false;
+    function startNonARMode(){
+      if (nonARActive) return; nonARActive = true;
+      log('Starting Non‑AR demo mode (no WebXR).');
+      enterUI.style.display = 'none'; hud.hidden = false; note.textContent = 'Non‑AR demo — no camera passthrough';
+      tablePlane = new THREE.Plane(new THREE.Vector3(0,1,0), 0); // y=0 plane
+      camera.position.set(0.8, 0.7, 1.2); camera.lookAt(0,0,0);
+      resetClothAboveTable();
+      const clock = new THREE.Clock();
+      function loop(){
+        const dt = Math.min(1/30, clock.getDelta());
+        simulateCloth(dt, null, null);
+        renderer.render(scene, camera);
+        if (nonARActive) requestAnimationFrame(loop);
+      }
+      loop();
+    }
+    startNonAR?.addEventListener('click', startNonARMode);
+
+    // Diagnostics button
+    runDiag?.addEventListener('click', async ()=>{
+      log('--- Diagnostics ---');
+      log('UserAgent:', navigator.userAgent);
+      log('Secure context:', window.isSecureContext, 'protocol:', location.protocol);
+      log('Visibility:', document.visibilityState);
+      log('Navigator.xr present:', !!navigator.xr);
+      try{ const a = await navigator.xr?.isSessionSupported?.('immersive-ar'); log('isSessionSupported(immersive-ar):', a); }catch(e){ log('isSessionSupported AR error:', e?.message||e); }
+      try{ const v = await navigator.xr?.isSessionSupported?.('immersive-vr'); log('isSessionSupported(immersive-vr):', v); }catch(e){ log('isSessionSupported VR error:', e?.message||e); }
+      if (navigator.xr){
+        try{
+          const test = await navigator.xr.requestSession('immersive-ar', { requiredFeatures: ['hand-tracking'] });
+          log('requestSession probe: SUCCESS');
+          await test.end();
+        }catch(e){ log('requestSession probe FAILED:', e?.name||'', e?.message||e); }
+      }
+      log('--- End Diagnostics ---');
+    });
+
+    copyLog?.addEventListener('click', ()=>{ try{ navigator.clipboard.writeText(logDiv.textContent||''); log('Copied log to clipboard'); }catch(e){ log('Clipboard copy failed:', e?.message||e); } });
 
     reloadBtn.onclick = ()=>{ tablePlane = null; resetClothAboveTable(); note.textContent = 'Reset. Scanning for table…'; };
 
