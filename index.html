@@ -1148,13 +1148,42 @@ function rearmReticle(){
 }
 
 /* ------------------------------- UI wiring ------------------------------ */
-document.getElementById('enter').addEventListener('click', ()=>{
+/*document.getElementById('enter').addEventListener('click', ()=>{
   enterAR().catch(err=>{
     console.error(err);
     setMsg('Failed to start AR: ' + err.message);
     setDot(false);
   });
-});
+});*/
+  const enterBtn = document.getElementById('enter');
+  enterBtn.addEventListener('click', onEnterClick);
+
+  async function onEnterClick(){
+    try {
+      if (!window.isSecureContext) {
+        setMsg('This page is not a secure context (HTTPS).');
+        setDot(false);
+        return;
+      }
+      if (!('xr' in navigator)) {
+        setMsg('WebXR is not available in this browser.');
+        setDot(false);
+        return;
+      }
+      const supported = await navigator.xr.isSessionSupported('immersive-ar');
+      if (!supported) {
+        setMsg('“immersive-ar” is not supported here.');
+        setDot(false);
+        return;
+      }
+      await enterAR();
+    } catch (err) {
+      console.error(err);
+      setMsg('Failed to start AR: ' + (err?.message || err));
+      setDot(false);
+    }
+  }
+
 document.getElementById('reset').addEventListener('click', resetAll);
 function toggleGizmo(){ gizmo.visible = !gizmo.visible; refreshGizmoBasis(); }
 function setBuild(shape){ buildShape = shape; }
@@ -1319,7 +1348,6 @@ function onXRFrame(t, frame){
 
 /* ------------------------------- Buttons -------------------------------- */
 function setBuildShape(shape){ buildShape = shape; }
-document.getElementById('enter').addEventListener('click', ()=>{ initClothBuffers(); });
 /* ------------------------------------------------------------------------ */
 
 setMsg('Ready. Tap "Enter Mixed Reality" on Quest 3.');
